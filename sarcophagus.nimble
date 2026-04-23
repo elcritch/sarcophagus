@@ -1,0 +1,6 @@
+version       = "0.1.0"
+author        = "Jaremy Creechley"
+description   = "mummy higher level api wrapper"
+license       = "BSD-2-Clause"
+srcDir        = "src"
+requires      "nim >= 2.0.0", "mummy", "checksums", "https://github.com/vercingetorx/jwt-nim"
