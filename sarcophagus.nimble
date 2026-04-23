@@ -3,4 +3,8 @@ author        = "Jaremy Creechley"
 description   = "mummy higher level api wrapper"
 license       = "BSD-2-Clause"
 srcDir        = "src"
-requires      "nim >= 2.0.0", "mummy", "checksums", "https://github.com/vercingetorx/jwt-nim"
+
+requires "nim >= 2.0.0"
+requires "mummy"
+requires "https://github.com/yglukhov/nim-jwt"
+
