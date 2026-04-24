@@ -3,7 +3,7 @@ import std/[json, os, strutils]
 import mummy
 import mummy/routers
 
-import ../../src/sarcophagus/[bearer_tokens, mummy_oauth2, oauth2]
+import sarcophagus/[bearer_tokens, mummy_oauth2, oauth2]
 
 proc respondJson(request: Request, statusCode: int, body: JsonNode) =
   var headers: mummy.HttpHeaders

@@ -1,6 +1,6 @@
 import std/unittest
 
-import ../src/sarcophagus/bearer_tokens
+import sarcophagus/bearer_tokens
 
 suite "bearer token core":
   test "parseSigningKeys rejects duplicate kids":

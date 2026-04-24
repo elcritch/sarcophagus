@@ -3,7 +3,7 @@ import std/[httpclient, json, random, unittest]
 import mummy
 import mummy/routers
 
-import ../src/sarcophagus/[bearer_tokens, mummy_bearer_auth]
+import sarcophagus/[bearer_tokens, mummy_bearer_auth]
 
 type ServerThreadArgs = object
   server: Server
