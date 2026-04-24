@@ -79,10 +79,10 @@ when isMainModule:
   var router: Router
   router.get("/health", healthHandler)
   router.post("/oauth/token", oauth2TokenHandler(config))
-  router.get("/api/read", withOAuth2BearerAuth(readHandler, config, @["sync:read"]))
-  router.get("/api/write", withOAuth2BearerAuth(writeHandler, config, @["sync:write"]))
-  router.get("/api/whoami", withOAuth2BearerAuth(claimsHandler, config, @["sync:read"]))
-  router.get("/api/admin", withOAuth2BearerAuth(readHandler, config, @["sync:admin"]))
+  router.get("/api/read", withOAuth2(readHandler, config, ["sync:read"]))
+  router.get("/api/write", withOAuth2(writeHandler, config, ["sync:write"]))
+  router.get("/api/whoami", withOAuth2(claimsHandler, config, ["sync:read"]))
+  router.get("/api/admin", withOAuth2(readHandler, config, ["sync:admin"]))
 
   let server = newServer(router, workerThreads = 1)
   echo "OAuth2 example server listening on http://", host, ":", port.int

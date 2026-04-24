@@ -99,27 +99,27 @@ proc requireOAuth2BearerAuth*(
   onError(request, validation.failure)
   false
 
-proc withOAuth2BearerAuth*(
+proc withOAuth2*(
     wrapped: RequestHandler,
     config: OAuth2Config,
-    requiredScopes: seq[string],
+    requiredScopes: openArray[string],
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2ErrorResponder,
 ): RequestHandler =
-  let scopes = requiredScopes
+  let scopes = @requiredScopes
   return proc(request: Request) {.gcsafe.} =
     if not requireOAuth2BearerAuth(request, config, scopes, onError):
       return
     wrapped(request)
 
-proc withOAuth2BearerAuth*(
+proc withOAuth2*(
     wrapped: OAuth2ProtectedRequestHandler,
     config: OAuth2Config,
-    requiredScopes: seq[string],
+    requiredScopes: openArray[string],
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2ErrorResponder,
 ): RequestHandler =
-  let scopes = requiredScopes
+  let scopes = @requiredScopes
   return proc(request: Request) {.gcsafe.} =
     let validation = validateOAuth2BearerRequest(request, config, scopes)
     if not validation.ok:
