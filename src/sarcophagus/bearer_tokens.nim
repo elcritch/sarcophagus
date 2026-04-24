@@ -1,6 +1,6 @@
 import std/[base64, json, options, sets, strutils, tables, times]
 
-import jwt_nim/hmac
+import jwt
 
 type
   SigningKey* = object
@@ -180,11 +180,7 @@ proc base64UrlDecode(input: string): string =
   decode(normalized)
 
 proc hmacSha256(message: string, secret: string): seq[byte] =
-  var ctx = newHmacCtx(secret, message, digestMod = SHA256)
-  let digestBytes = ctx.digest()
-  result = newSeq[byte](digestBytes.len)
-  for idx, value in digestBytes:
-    result[idx] = byte(value)
+  signString(message, secret, HS256)
 
 proc constantTimeEquals(lhs: string, rhs: string): bool =
   var diff = lhs.len xor rhs.len

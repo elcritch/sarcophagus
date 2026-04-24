@@ -6,5 +6,4 @@ srcDir        = "src"
 
 requires "nim >= 2.0.0"
 requires "mummy"
-requires "https://github.com/yglukhov/nim-jwt"
-
+requires "git@github.com:elcritch/nim-jwt"
