@@ -25,7 +25,7 @@ proc claimsHandler(request: Request, claims: BearerTokenClaims) {.gcsafe.} =
   request.respondJson(200, %*{"subject": claims.subject, "scopes": claims.scopes})
 
 suite "mummy bearer auth":
-  test "middleware protects routes and passes claims through":
+  test "macro and proc forms both protect routes and pass claims through":
     randomize()
     let config = initBearerTokenConfig(
       issuer = "sam-sync-server",
@@ -48,8 +48,10 @@ suite "mummy bearer auth":
     var router: Router
     router.get("/ok", okHandler)
     withBearerTokAuth(config, ["sync:read"]):
-      router.get("/protected", okHandler)
-      router.get("/claims", claimsHandler)
+      router.get("/macro/protected", okHandler)
+      router.get("/macro/claims", claimsHandler)
+    router.get("/proc/protected", bearerTokAuth(okHandler, config, ["sync:read"]))
+    router.get("/proc/claims", bearerTokAuth(claimsHandler, config, ["sync:read"]))
 
     let server = newServer(router, workerThreads = 1)
     let portNumber = 20000 + rand(20000)
@@ -70,28 +72,29 @@ suite "mummy bearer auth":
 
     let baseUrl = "http://127.0.0.1:" & $portNumber
 
-    let unauthenticated = client.get(baseUrl & "/protected")
-    check unauthenticated.code.int == 401
-    let unauthBody = parseJson(unauthenticated.body)
-    check unauthBody["error"]["code"].getStr() == "missing_token"
-
     var readHeaders = newHttpHeaders({"Authorization": "Bearer " & readToken})
-    let authenticated = client.request(
-      baseUrl & "/protected", httpMethod = HttpGet, headers = readHeaders
-    )
-    check authenticated.code.int == 200
-
-    let claimsResponse =
-      client.request(baseUrl & "/claims", httpMethod = HttpGet, headers = readHeaders)
-    check claimsResponse.code.int == 200
-    let claimsBody = parseJson(claimsResponse.body)
-    check claimsBody["subject"].getStr() == "client-1"
-    check claimsBody["scopes"][0].getStr() == "sync:read"
-
     var writeHeaders = newHttpHeaders({"Authorization": "Bearer " & writeOnlyToken})
-    let outOfScope = client.request(
-      baseUrl & "/protected", httpMethod = HttpGet, headers = writeHeaders
-    )
-    check outOfScope.code.int == 403
-    let outOfScopeBody = parseJson(outOfScope.body)
-    check outOfScopeBody["error"]["code"].getStr() == "insufficient_scope"
+
+    for path in ["/macro/protected", "/proc/protected"]:
+      let unauthenticated = client.get(baseUrl & path)
+      check unauthenticated.code.int == 401
+      let unauthBody = parseJson(unauthenticated.body)
+      check unauthBody["error"]["code"].getStr() == "missing_token"
+
+      let authenticated =
+        client.request(baseUrl & path, httpMethod = HttpGet, headers = readHeaders)
+      check authenticated.code.int == 200
+
+      let outOfScope =
+        client.request(baseUrl & path, httpMethod = HttpGet, headers = writeHeaders)
+      check outOfScope.code.int == 403
+      let outOfScopeBody = parseJson(outOfScope.body)
+      check outOfScopeBody["error"]["code"].getStr() == "insufficient_scope"
+
+    for path in ["/macro/claims", "/proc/claims"]:
+      let claimsResponse =
+        client.request(baseUrl & path, httpMethod = HttpGet, headers = readHeaders)
+      check claimsResponse.code.int == 200
+      let claimsBody = parseJson(claimsResponse.body)
+      check claimsBody["subject"].getStr() == "client-1"
+      check claimsBody["scopes"][0].getStr() == "sync:read"
