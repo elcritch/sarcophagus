@@ -21,6 +21,7 @@ jobs:
           key: ${{ runner.os }}-atlas-${{ hashFiles('sarcophagus.nimble') }}
           restore-keys: |
             ${{ runner.os }}-atlas-
+      - run: nimble install "https://github.com/nim-lang/atlas"
       - run: atlas init
       - run: atlas install --feature:test
       - run: nim test
