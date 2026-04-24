@@ -1,4 +1,4 @@
-import std/json
+import std/[json, macros]
 
 import mummy
 
@@ -10,6 +10,9 @@ type
 
   AuthenticatedRequestHandler* =
     proc(request: Request, claims: BearerTokenClaims) {.gcsafe.}
+
+const routeRegistrationNames =
+  ["addRoute", "get", "head", "post", "put", "delete", "options", "patch"]
 
 proc respondJson(request: Request, statusCode: int, body: string) =
   var headers: HttpHeaders
@@ -48,28 +51,68 @@ proc requireBearerAuth*(
   onError(request, validation.failure)
   false
 
-proc withBearerAuth*(
+proc bearerTokAuth*(
     wrapped: RequestHandler,
     config: BearerTokenConfig,
-    requiredScopes: seq[string],
+    requiredScopes: openArray[string],
     onError: AuthErrorResponder = defaultAuthErrorResponder,
 ): RequestHandler =
-  let scopes = requiredScopes
+  let scopes = @requiredScopes
   return proc(request: Request) {.gcsafe.} =
     if not requireBearerAuth(request, config, scopes, onError):
       return
     wrapped(request)
 
-proc withBearerAuth*(
+proc bearerTokAuth*(
     wrapped: AuthenticatedRequestHandler,
     config: BearerTokenConfig,
-    requiredScopes: seq[string],
+    requiredScopes: openArray[string],
     onError: AuthErrorResponder = defaultAuthErrorResponder,
 ): RequestHandler =
-  let scopes = requiredScopes
+  let scopes = @requiredScopes
   return proc(request: Request) {.gcsafe.} =
     let validation = validateBearerRequest(request, config, scopes)
     if not validation.ok:
       onError(request, validation.failure)
       return
     wrapped(request, validation.claims)
+
+proc isRouteRegistrationCall(node: NimNode): bool =
+  if node.kind notin {nnkCall, nnkCommand} or node.len == 0:
+    return false
+  let callee = node[0]
+  if callee.kind != nnkDotExpr or callee.len != 2:
+    return false
+  if callee[1].kind != nnkIdent:
+    return false
+  let name = $callee[1]
+  name in routeRegistrationNames
+
+proc rewriteWithBearerTokAuth(
+    node: NimNode, config: NimNode, requiredScopes: NimNode
+): NimNode =
+  case node.kind
+  of nnkStmtList:
+    result = newStmtList()
+    for child in node:
+      result.add(rewriteWithBearerTokAuth(child, config, requiredScopes))
+  of nnkCall, nnkCommand:
+    result = copyNimTree(node)
+    if isRouteRegistrationCall(node):
+      if result.len < 3:
+        error(
+          "withBearerTokAuth expects route registrations with a handler argument", node
+        )
+      let handlerIdx = result.len - 1
+      result[handlerIdx] =
+        newCall(bindSym"bearerTokAuth", result[handlerIdx], config, requiredScopes)
+    else:
+      for idx in 1 ..< result.len:
+        result[idx] = rewriteWithBearerTokAuth(result[idx], config, requiredScopes)
+  else:
+    result = copyNimTree(node)
+    for idx in 0 ..< result.len:
+      result[idx] = rewriteWithBearerTokAuth(result[idx], config, requiredScopes)
+
+macro withBearerTokAuth*(config: typed, requiredScopes: typed, body: untyped): untyped =
+  rewriteWithBearerTokAuth(body, config, requiredScopes)

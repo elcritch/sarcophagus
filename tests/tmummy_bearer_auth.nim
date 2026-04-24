@@ -47,8 +47,9 @@ suite "mummy bearer auth":
 
     var router: Router
     router.get("/ok", okHandler)
-    router.get("/protected", withBearerAuth(okHandler, config, @["sync:read"]))
-    router.get("/claims", withBearerAuth(claimsHandler, config, @["sync:read"]))
+    withBearerTokAuth(config, ["sync:read"]):
+      router.get("/protected", okHandler)
+      router.get("/claims", claimsHandler)
 
     let server = newServer(router, workerThreads = 1)
     let portNumber = 20000 + rand(20000)
