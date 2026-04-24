@@ -22,7 +22,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-atlas-
       - run: echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
-      - run: nimble install "https://github.com/nim-lang/atlas"
+      - run: nimble install "https://github.com/nim-lang/atlas@#head"
       - run: atlas -v
       - run: atlas init
       - run: atlas install --feature:test
