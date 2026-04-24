@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: '2.2.8'
+          nim-version: '2.2.10'
       - name: Cache atlas deps
         uses: actions/cache@v4
         with:
@@ -21,7 +21,9 @@ jobs:
           key: ${{ runner.os }}-atlas-${{ hashFiles('sarcophagus.nimble') }}
           restore-keys: |
             ${{ runner.os }}-atlas-
+      - run: echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
       - run: nimble install "https://github.com/nim-lang/atlas"
+      - run: atlas -v
       - run: atlas init
       - run: atlas install --feature:test
       - run: nim test
