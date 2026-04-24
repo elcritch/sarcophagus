@@ -1,4 +1,4 @@
-import std/json
+import std/[json, macros]
 
 import mummy
 
@@ -7,6 +7,9 @@ import ./oauth2
 
 type OAuth2ProtectedRequestHandler* =
   proc(request: Request, claims: BearerTokenClaims) {.gcsafe.}
+
+const routeRegistrationNames =
+  ["addRoute", "get", "head", "post", "put", "delete", "options", "patch"]
 
 proc respondJson(
     request: Request, statusCode: int, body: string, headers: HttpHeaders
@@ -113,7 +116,7 @@ proc requireOAuth2BearerAuth*(
 ): bool {.gcsafe.} =
   requireOAuth2BearerAuth(request, config, scopeClaimsToScopes(requiredClaims), onError)
 
-proc withOAuth2*(
+proc oauth2*(
     wrapped: RequestHandler,
     config: OAuth2Config,
     requiredScopes: openArray[string],
@@ -126,7 +129,7 @@ proc withOAuth2*(
       return
     wrapped(request)
 
-proc withOAuth2*(
+proc oauth2*(
     wrapped: OAuth2ProtectedRequestHandler,
     config: OAuth2Config,
     requiredScopes: openArray[string],
@@ -141,20 +144,58 @@ proc withOAuth2*(
       return
     wrapped(request, validation.claims)
 
-proc withOAuth2*(
+proc oauth2*(
     wrapped: RequestHandler,
     config: OAuth2Config,
     requiredClaims: openArray[OAuth2ScopeClaim],
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2ErrorResponder,
 ): RequestHandler =
-  withOAuth2(wrapped, config, scopeClaimsToScopes(requiredClaims), onError)
+  oauth2(wrapped, config, scopeClaimsToScopes(requiredClaims), onError)
 
-proc withOAuth2*(
+proc oauth2*(
     wrapped: OAuth2ProtectedRequestHandler,
     config: OAuth2Config,
     requiredClaims: openArray[OAuth2ScopeClaim],
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2ErrorResponder,
 ): RequestHandler =
-  withOAuth2(wrapped, config, scopeClaimsToScopes(requiredClaims), onError)
+  oauth2(wrapped, config, scopeClaimsToScopes(requiredClaims), onError)
+
+proc isRouteRegistrationCall(node: NimNode): bool =
+  if node.kind notin {nnkCall, nnkCommand} or node.len == 0:
+    return false
+  let callee = node[0]
+  if callee.kind != nnkDotExpr or callee.len != 2:
+    return false
+  if callee[1].kind != nnkIdent:
+    return false
+  let name = $callee[1]
+  name in routeRegistrationNames
+
+proc rewriteWithOAuth2(
+    node: NimNode, config: NimNode, requiredClaims: NimNode
+): NimNode =
+  case node.kind
+  of nnkStmtList:
+    result = newStmtList()
+    for child in node:
+      result.add(rewriteWithOAuth2(child, config, requiredClaims))
+  of nnkCall, nnkCommand:
+    result = copyNimTree(node)
+    if isRouteRegistrationCall(node):
+      if result.len < 3:
+        error("withOAuth2 expects route registrations with a handler argument", node)
+      let handlerIdx = result.len - 1
+      result[handlerIdx] =
+        newCall(bindSym"oauth2", result[handlerIdx], config, requiredClaims)
+    else:
+      for idx in 1 ..< result.len:
+        result[idx] = rewriteWithOAuth2(result[idx], config, requiredClaims)
+  else:
+    result = copyNimTree(node)
+    for idx in 0 ..< result.len:
+      result[idx] = rewriteWithOAuth2(result[idx], config, requiredClaims)
+
+macro withOAuth2*(config: typed, requiredClaims: typed, body: untyped): untyped =
+  rewriteWithOAuth2(body, config, requiredClaims)

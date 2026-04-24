@@ -59,8 +59,9 @@ suite "mummy oauth2":
     check tokenResponse.ok
 
     var router: Router
-    router.get("/protected", withOAuth2(okHandler, config, ["sync:read"]))
-    router.get("/claims", withOAuth2(claimsHandler, config, ["sync:read"]))
+    withOAuth2(config, ["sync:read"]):
+      router.get("/protected", okHandler)
+      router.get("/claims", claimsHandler)
 
     let server = newServer(router, workerThreads = 1)
     let portNumber = 20000 + rand(20000)
@@ -129,7 +130,7 @@ suite "mummy oauth2":
 
     var router: Router
     router.post("/oauth/token", oauth2TokenHandler(config))
-    router.get("/claims", withOAuth2(claimsHandler, config, ["sync:read"]))
+    router.get("/claims", oauth2(claimsHandler, config, ["sync:read"]))
 
     let server = newServer(router, workerThreads = 1)
     let portNumber = 20000 + rand(20000)
@@ -231,7 +232,7 @@ suite "mummy oauth2":
 
     var router: Router
     router.post("/oauth/token", oauth2TokenHandler(config))
-    router.get("/claims", withOAuth2(claimsHandler, config, {"sync": "read"}))
+    router.get("/claims", oauth2(claimsHandler, config, {"sync": "read"}))
 
     let server = newServer(router, workerThreads = 1)
     let portNumber = 20000 + rand(20000)
@@ -285,7 +286,7 @@ suite "mummy oauth2":
     check tokenResponse.ok
 
     var router: Router
-    router.get("/write-only", withOAuth2(okHandler, config, ["sync:write"]))
+    router.get("/write-only", oauth2(okHandler, config, ["sync:write"]))
 
     let server = newServer(router, workerThreads = 1)
     let portNumber = 20000 + rand(20000)
