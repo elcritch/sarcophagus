@@ -21,6 +21,9 @@ proc respondJson(request: Request, statusCode: int, body: JsonNode) =
 proc claimsHandler(request: Request, claims: BearerTokenClaims) {.gcsafe.} =
   request.respondJson(200, %*{"subject": claims.subject, "scopes": claims.scopes})
 
+proc okHandler(request: Request) {.gcsafe.} =
+  request.respondJson(200, %*{"status": "ok"})
+
 proc testConfig(): OAuth2Config =
   let tokenConfig = initBearerTokenConfig(
     issuer = "sam-sync-server",
@@ -44,6 +47,82 @@ proc testConfig(): OAuth2Config =
   )
 
 suite "mummy oauth2":
+  test "protected api routes enforce bearer auth semantics":
+    randomize()
+    let config = testConfig()
+    let tokenResponse = issueClientCredentialsToken(
+      config,
+      authorizationHeader = "Basic cmVhZGVyLWFwcDpzZWNyZXQtcmVhZGVy",
+      contentType = "application/x-www-form-urlencoded",
+      requestBody = "grant_type=client_credentials&scope=sync%3Aread",
+    )
+    check tokenResponse.ok
+
+    var router: Router
+    router.get("/protected", withOAuth2BearerAuth(okHandler, config, @["sync:read"]))
+    router.get("/claims", withOAuth2BearerAuth(claimsHandler, config, @["sync:read"]))
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let baseUrl = "http://127.0.0.1:" & $portNumber
+    let accessToken = tokenResponse.response.accessToken
+
+    let unauthenticated = client.get(baseUrl & "/protected")
+    check unauthenticated.code.int == 401
+    check unauthenticated.headers["WWW-Authenticate"] == """Bearer realm="sam-sync""""
+
+    let malformed = client.request(
+      baseUrl & "/protected",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer"}),
+    )
+    check malformed.code.int == 400
+    check malformed.headers["WWW-Authenticate"].len > 0
+    check parseJson(malformed.body)["error"]["error"].getStr() == "invalid_request"
+
+    let invalid = client.request(
+      baseUrl & "/protected",
+      httpMethod = HttpGet,
+      headers =
+        newHttpHeaders({"Authorization": "Bearer " & accessToken[0 .. ^2] & "x"}),
+    )
+    check invalid.code.int == 401
+    check invalid.headers["WWW-Authenticate"].len > 0
+    check parseJson(invalid.body)["error"]["error"].getStr() == "invalid_token"
+
+    let authenticated = client.request(
+      baseUrl & "/protected",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & accessToken}),
+    )
+    check authenticated.code.int == 200
+    check parseJson(authenticated.body)["status"].getStr() == "ok"
+
+    let claimsResponse = client.request(
+      baseUrl & "/claims",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & accessToken}),
+    )
+    check claimsResponse.code.int == 200
+    let claimsBody = parseJson(claimsResponse.body)
+    check claimsBody["subject"].getStr() == "reader-service"
+    check claimsBody["scopes"][0].getStr() == "sync:read"
+
   test "token endpoint and protected resource work together":
     randomize()
     let config = testConfig()
@@ -145,3 +224,47 @@ suite "mummy oauth2":
     check response.headers["WWW-Authenticate"] == """Basic realm="sam-sync""""
     let body = parseJson(response.body)
     check body["error"]["error"].getStr() == "invalid_client"
+
+  test "protected api routes return insufficient_scope for wrong scope":
+    randomize()
+    let config = testConfig()
+    let tokenResponse = issueClientCredentialsToken(
+      config,
+      authorizationHeader = "Basic cmVhZGVyLWFwcDpzZWNyZXQtcmVhZGVy",
+      contentType = "application/x-www-form-urlencoded",
+      requestBody = "grant_type=client_credentials&scope=sync%3Aread",
+    )
+    check tokenResponse.ok
+
+    var router: Router
+    router.get("/write-only", withOAuth2BearerAuth(okHandler, config, @["sync:write"]))
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let response = client.request(
+      "http://127.0.0.1:" & $portNumber & "/write-only",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders(
+        {"Authorization": "Bearer " & tokenResponse.response.accessToken}
+      ),
+    )
+
+    check response.code.int == 403
+    check response.headers["WWW-Authenticate"].len > 0
+    let body = parseJson(response.body)
+    check body["error"]["error"].getStr() == "insufficient_scope"
