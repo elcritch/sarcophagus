@@ -64,6 +64,27 @@ suite "oauth2 client credentials":
     check result.ok
     check result.response.scope == "sync:read"
 
+  test "supports json request-body auth without grant_type or scope":
+    let config = testConfig()
+    let result = issueClientCredentialsToken(
+      config,
+      authorizationHeader = "",
+      contentType = "application/json",
+      requestBody = """{"client_id":"reader-app","client_secret":"secret-reader"}""",
+      now = 1_700_000_000,
+    )
+
+    check result.ok
+    check result.response.scope == "sync:read"
+    let validation = validateOAuth2BearerToken(
+      config,
+      "Bearer " & result.response.accessToken,
+      ["sync:read"],
+      now = 1_700_000_010,
+    )
+    check validation.ok
+    check validation.claims.subject == "reader-service"
+
   test "rejects multiple client authentication methods":
     let config = testConfig()
     let result = issueClientCredentialsToken(
@@ -166,3 +187,8 @@ suite "oauth2 client credentials":
 
     check response.toJson()["token_type"].getStr() == "Bearer"
     check failure.toJson()["error_description"].getStr() == "bad request"
+
+  test "scope claim pairs normalize to oauth scope strings":
+    check scopeClaimsToScopes({"sync": "read"}) == @["sync:read"]
+    check scopeClaimsToScopes({"sync": "read", "user": "admin"}) ==
+      @["sync:read", "user:admin"]

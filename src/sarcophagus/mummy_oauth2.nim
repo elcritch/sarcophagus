@@ -85,6 +85,11 @@ proc validateOAuth2BearerRequest*(
 ): OAuth2ResourceResult {.gcsafe.} =
   validateOAuth2BearerToken(config, request.headers["Authorization"], requiredScopes)
 
+proc validateOAuth2BearerRequest*(
+    request: Request, config: OAuth2Config, requiredClaims: openArray[OAuth2ScopeClaim]
+): OAuth2ResourceResult {.gcsafe.} =
+  validateOAuth2BearerRequest(request, config, scopeClaimsToScopes(requiredClaims))
+
 proc requireOAuth2BearerAuth*(
     request: Request,
     config: OAuth2Config,
@@ -98,6 +103,15 @@ proc requireOAuth2BearerAuth*(
 
   onError(request, validation.failure)
   false
+
+proc requireOAuth2BearerAuth*(
+    request: Request,
+    config: OAuth2Config,
+    requiredClaims: openArray[OAuth2ScopeClaim],
+    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
+      defaultOAuth2ErrorResponder,
+): bool {.gcsafe.} =
+  requireOAuth2BearerAuth(request, config, scopeClaimsToScopes(requiredClaims), onError)
 
 proc withOAuth2*(
     wrapped: RequestHandler,
@@ -126,3 +140,21 @@ proc withOAuth2*(
       onError(request, validation.failure)
       return
     wrapped(request, validation.claims)
+
+proc withOAuth2*(
+    wrapped: RequestHandler,
+    config: OAuth2Config,
+    requiredClaims: openArray[OAuth2ScopeClaim],
+    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
+      defaultOAuth2ErrorResponder,
+): RequestHandler =
+  withOAuth2(wrapped, config, scopeClaimsToScopes(requiredClaims), onError)
+
+proc withOAuth2*(
+    wrapped: OAuth2ProtectedRequestHandler,
+    config: OAuth2Config,
+    requiredClaims: openArray[OAuth2ScopeClaim],
+    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
+      defaultOAuth2ErrorResponder,
+): RequestHandler =
+  withOAuth2(wrapped, config, scopeClaimsToScopes(requiredClaims), onError)

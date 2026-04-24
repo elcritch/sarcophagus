@@ -45,6 +45,8 @@ type
     claims*: BearerTokenClaims
     failure*: OAuth2Failure
 
+  OAuth2ScopeClaim* = tuple[name: string, value: string]
+
 type ParsedAuthorizationHeader = object
   present: bool
   malformed: bool
@@ -200,6 +202,29 @@ proc parseRequestParams(body: string): Table[string, string] =
       raise newException(ValueError, "duplicate parameter: " & key)
     result[key] = value
 
+proc parseJsonRequestParams(body: string): Table[string, string] =
+  result = initTable[string, string]()
+  if body.strip().len == 0:
+    return
+
+  let payload =
+    try:
+      parseJson(body)
+    except CatchableError as e:
+      raise newException(ValueError, "invalid json request body: " & e.msg)
+
+  if payload.kind != JObject:
+    raise newException(ValueError, "json request body must be an object")
+
+  for key, value in payload:
+    case value.kind
+    of JString:
+      result[key] = value.getStr()
+    of JNull:
+      discard
+    else:
+      raise newException(ValueError, "json request parameters must be strings or null")
+
 proc parseBasicCredentials(
     authorizationHeader: ParsedAuthorizationHeader
 ): tuple[clientId: string, clientSecret: string] =
@@ -234,9 +259,23 @@ proc resolveRequestedScopes(
 
   client.allowedScopes
 
+proc scopeClaimsToScopes*(requiredClaims: openArray[OAuth2ScopeClaim]): seq[string] =
+  for (name, value) in requiredClaims:
+    let trimmedName = name.strip()
+    let trimmedValue = value.strip()
+    if trimmedName.len == 0:
+      raise newException(ValueError, "scope claim name must not be empty")
+    if trimmedValue.len == 0:
+      raise newException(ValueError, "scope claim value must not be empty")
+    result.add(trimmedName & ":" & trimmedValue)
+
 proc isFormUrlEncodedContentType*(contentType: string): bool =
   let mediaType = contentType.split(';', maxsplit = 1)[0].strip().toLowerAscii()
   mediaType == "application/x-www-form-urlencoded"
+
+proc isJsonContentType*(contentType: string): bool =
+  let mediaType = contentType.split(';', maxsplit = 1)[0].strip().toLowerAscii()
+  mediaType == "application/json"
 
 proc initOAuth2Client*(
     clientId: string,
@@ -312,15 +351,18 @@ proc issueClientCredentialsToken*(
     requestBody: string,
     now = nowUnix(),
 ): OAuth2TokenResult =
-  if not isFormUrlEncodedContentType(contentType):
+  if not isFormUrlEncodedContentType(contentType) and not isJsonContentType(contentType):
     return tokenFailure(
       400, "invalid_request",
-      "Token requests must use application/x-www-form-urlencoded",
+      "Token requests must use application/x-www-form-urlencoded or application/json",
     )
 
   let params =
     try:
-      parseRequestParams(requestBody)
+      if isJsonContentType(contentType):
+        parseJsonRequestParams(requestBody)
+      else:
+        parseRequestParams(requestBody)
     except ValueError as e:
       return tokenFailure(400, "invalid_request", e.msg)
 
@@ -351,10 +393,7 @@ proc issueClientCredentialsToken*(
       "The client must not use more than one authentication method",
     )
 
-  let grantType = params.getOrDefault("grant_type", "")
-  if grantType.len == 0:
-    return
-      tokenFailure(400, "invalid_request", "Missing required parameter: grant_type")
+  let grantType = params.getOrDefault("grant_type", "client_credentials")
   if grantType != "client_credentials":
     return tokenFailure(
       400, "unsupported_grant_type", "Only the client_credentials grant is supported"

@@ -59,6 +59,18 @@ proc requestToken(
     body = "grant_type=client_credentials&scope=" & scope,
   )
 
+proc requestTokenJsonMinimal(
+    client: HttpClient, baseUrl: string, clientId: string, clientSecret: string
+): Response =
+  client.request(
+    baseUrl & "/oauth/token",
+    httpMethod = HttpPost,
+    headers = newHttpHeaders({"Content-Type": "application/json"}),
+    body =
+      """{"client_id":"""" & clientId & """","client_secret":"""" & clientSecret &
+      """"}""",
+  )
+
 proc main() =
   let repoDir = repoRoot()
   let serverBinary = repoDir / "examples" / "oauth2" / "server_bin"
@@ -94,6 +106,12 @@ proc main() =
     requestToken(client, baseUrl, "reader-app", "wrong-secret", "sync%3Aread")
   printResponse("bad client credentials", badClient)
 
+  let partnerStyleTokenResponse =
+    requestTokenJsonMinimal(client, baseUrl, "reader-app", "reader-secret")
+  printResponse("partner-style json token", partnerStyleTokenResponse)
+  let partnerStyleToken =
+    parseJson(partnerStyleTokenResponse.body)["access_token"].getStr()
+
   let readerTokenResponse =
     requestToken(client, baseUrl, "reader-app", "reader-secret", "sync%3Aread")
   printResponse("reader token", readerTokenResponse)
@@ -115,9 +133,9 @@ proc main() =
   let readerWhoAmI = client.request(
     baseUrl & "/api/whoami",
     httpMethod = HttpGet,
-    headers = newHttpHeaders({"Authorization": "Bearer " & readerToken}),
+    headers = newHttpHeaders({"Authorization": "Bearer " & partnerStyleToken}),
   )
-  printResponse("reader token -> whoami api", readerWhoAmI)
+  printResponse("partner-style token -> whoami api", readerWhoAmI)
 
   let writerWrite = client.request(
     baseUrl & "/api/write",

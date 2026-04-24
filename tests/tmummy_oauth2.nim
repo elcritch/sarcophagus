@@ -225,6 +225,54 @@ suite "mummy oauth2":
     let body = parseJson(response.body)
     check body["error"]["error"].getStr() == "invalid_client"
 
+  test "token endpoint accepts json body without grant_type or scope":
+    randomize()
+    let config = testConfig()
+
+    var router: Router
+    router.post("/oauth/token", oauth2TokenHandler(config))
+    router.get("/claims", withOAuth2(claimsHandler, config, {"sync": "read"}))
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let baseUrl = "http://127.0.0.1:" & $portNumber
+    let tokenResponse = client.request(
+      baseUrl & "/oauth/token",
+      httpMethod = HttpPost,
+      headers = newHttpHeaders({"Content-Type": "application/json"}),
+      body = """{"client_id":"reader-app","client_secret":"secret-reader"}""",
+    )
+
+    check tokenResponse.code.int == 200
+    let tokenBody = parseJson(tokenResponse.body)
+    check tokenBody["scope"].getStr() == "sync:read"
+
+    let claimsResponse = client.request(
+      baseUrl & "/claims",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders(
+        {"Authorization": "Bearer " & tokenBody["access_token"].getStr()}
+      ),
+    )
+    check claimsResponse.code.int == 200
+    let claimsBody = parseJson(claimsResponse.body)
+    check claimsBody["subject"].getStr() == "reader-service"
+
   test "protected api routes return insufficient_scope for wrong scope":
     randomize()
     let config = testConfig()
