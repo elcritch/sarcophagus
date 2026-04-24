@@ -2,7 +2,7 @@ import std/[json, macros]
 
 import mummy
 
-import ./bearer_tokens
+import ./core/jwt_bearer_tokens
 
 type
   AuthErrorResponder* =
