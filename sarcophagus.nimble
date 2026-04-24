@@ -6,4 +6,4 @@ srcDir        = "src"
 
 requires "nim >= 2.0.0"
 requires "mummy"
-requires "git@github.com:elcritch/nim-jwt#head"
+requires "git@github.com:elcritch/nim-jwt#fix-upstream"
