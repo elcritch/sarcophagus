@@ -27,4 +27,3 @@ jobs:
       - run: atlas init
       - run: atlas install --feature:test
       - run: nim test
-      - run: nim docs
