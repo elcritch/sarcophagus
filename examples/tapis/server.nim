@@ -50,7 +50,7 @@ proc examplePets(): seq[Pet] =
     Pet(id: 3, name: "Linus", species: "fox", status: petSold, age: some(6)),
   ]
 
-proc listPets(params: ListPetsParams): PetList {.gcsafe.} =
+proc listPets(params: Params[ListPetsParams]): PetList {.gcsafe.} =
   var pets: seq[Pet]
   for pet in examplePets():
     if params.status.isSome() and pet.status != params.status.get():
@@ -62,12 +62,19 @@ proc listPets(params: ListPetsParams): PetList {.gcsafe.} =
 
   PetList(items: pets, count: pets.len)
 
-proc getPet(params: PetPath): Pet {.gcsafe.} =
+proc getPet(params: Params[PetPath]): Pet {.gcsafe.} =
   for pet in examplePets():
     if pet.id == params.id:
       return pet
 
   raiseApiError(404, "pet not found", "pet_not_found", details = %*{"id": params.id})
+
+proc getPetFlat(id: int, includeSold: Option[bool]): Pet {.gcsafe.} =
+  for pet in examplePets():
+    if pet.id == id and (includeSold.get(false) or pet.status != petSold):
+      return pet
+
+  raiseApiError(404, "pet not found", "pet_not_found", details = %*{"id": id})
 
 proc createPet(body: CreatePetBody): ApiResponse[Pet] {.gcsafe.} =
   var headers: HttpHeaders
@@ -93,7 +100,7 @@ proc updatePet(input: ApiRequest[PetPath, CreatePetBody]): Pet {.gcsafe.} =
     age: input.body.age,
   )
 
-proc deletePet(params: PetPath): MessageResponse {.gcsafe.} =
+proc deletePet(params: Params[PetPath]): MessageResponse {.gcsafe.} =
   MessageResponse(status: "ok", message: "delete requested for pet " & $params.id)
 
 proc brokenRoute(): MessageResponse {.gcsafe.} =
@@ -124,6 +131,12 @@ when isMainModule:
   apiRouter.get("/health", health, summary = "Health check", tags = ["system"])
   apiRouter.get("/pets", listPets, summary = "List pets", tags = ["pets"])
   apiRouter.get("/pets/@id", getPet, summary = "Get a pet", tags = ["pets"])
+  apiRouter.get(
+    "/flat-pets/@id",
+    getPetFlat,
+    summary = "Get a pet with flat params",
+    tags = ["pets"],
+  )
   apiRouter.post(
     "/pets", createPet, summary = "Create a pet", tags = ["pets"], responseStatus = 201
   )

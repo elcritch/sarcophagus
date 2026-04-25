@@ -91,6 +91,9 @@ proc main() =
   let pet = client.get(baseUrl & "/pets/1")
   printResponse("get pet with typed path param", pet)
 
+  let flatPet = client.get(baseUrl & "/flat-pets/3?includeSold=true")
+  printResponse("get pet with flat path and query params", flatPet)
+
   let created = client.request(
     baseUrl & "/pets",
     httpMethod = HttpPost,

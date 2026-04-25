@@ -39,7 +39,7 @@ type
 proc serveServer(args: ServerThreadArgs) {.thread.} =
   args.server.serve(args.port, address = args.address)
 
-proc getItem(params: GetItemParams): ItemOut {.gcsafe.} =
+proc getItem(params: Params[GetItemParams]): ItemOut {.gcsafe.} =
   let verbose =
     if params.verbose.isSome():
       params.verbose.get()
@@ -56,7 +56,7 @@ proc getItem(params: GetItemParams): ItemOut {.gcsafe.} =
 
 # api.get("/read-items/@id", readItem, summary = "Read item", tags = ["items"])
 proc readItem(
-    params: GetItemParams
+    params: Params[GetItemParams]
 ): ItemOut {.tapi(get, "/read-items/@id", summary = "Read item", tags = ["items"]).} =
   let verbose =
     if params.verbose.isSome():
@@ -72,8 +72,18 @@ proc readItem(
     id: params.id, name: "read-" & $params.id, count: 1, verbose: verbose, mode: mode
   )
 
+proc getFlatItem(id: int, verbose: Option[bool]): ItemOut {.gcsafe.} =
+  ItemOut(id: id, name: "flat-" & $id, count: 1, verbose: verbose.get(false), mode: "")
+
+proc readFlatItem(
+    id: int, verbose: Option[bool]
+): ItemOut {.tapi(get, "/flat-read-items/@id", summary = "Read flat item").} =
+  ItemOut(
+    id: id, name: "flat-read-" & $id, count: 1, verbose: verbose.get(false), mode: ""
+  )
+
 proc getNamedTupleItem(
-    params: tuple[id: int, verbose: Option[bool]]
+    params: Params[tuple[id: int, verbose: Option[bool]]]
 ): ItemOut {.gcsafe.} =
   ItemOut(
     id: params.id,
@@ -84,7 +94,7 @@ proc getNamedTupleItem(
   )
 
 proc getUnnamedTupleItem(
-    params: (int, string)
+    params: Params[(int, string)]
 ): tuple[id: int, label: string] {.gcsafe.} =
   (id: params[0], label: params[1])
 
@@ -116,6 +126,8 @@ proc buildApi(includeStackTraces = false): ApiRouter =
   let api = initApiRouter("Typed Test API", "1.2.3", config)
   api.get("/items/@id", getItem, summary = "Get item", tags = ["items"])
   api.add(readItem)
+  api.get("/flat-items/@id", getFlatItem, summary = "Get flat item")
+  api.add(readFlatItem)
   api.post("/items", createItem, summary = "Create item", responseStatus = 201)
   api.put("/items/@id", upsertItem, summary = "Upsert item")
   api.get("/tuple-items/@id", getNamedTupleItem, summary = "Get tuple item")
@@ -171,6 +183,34 @@ suite "typed mummy tapis":
       check body["name"].getStr() == "read-8"
       check body["verbose"].getBool() == true
       check body["mode"].getStr() == "modeSlow"
+
+  test "parses flat path and query handler parameters":
+    withTestServer do(baseUrl: string):
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let response = client.get(baseUrl & "/flat-items/11?verbose=true")
+      check response.code.int == 200
+
+      let body = parseJson(response.body)
+      check body["id"].getInt() == 11
+      check body["name"].getStr() == "flat-11"
+      check body["verbose"].getBool() == true
+
+  test "registers flat tapi pragma handlers with api.add":
+    withTestServer do(baseUrl: string):
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let response = client.get(baseUrl & "/flat-read-items/12?verbose=true")
+      check response.code.int == 200
+
+      let body = parseJson(response.body)
+      check body["id"].getInt() == 12
+      check body["name"].getStr() == "flat-read-12"
+      check body["verbose"].getBool() == true
 
   test "parses named tuple query params without declaring an object type":
     withTestServer do(baseUrl: string):
@@ -283,6 +323,13 @@ suite "typed mummy tapis":
       check getOperation["parameters"][0]["name"].getStr() == "id"
       check getOperation["parameters"][0]["in"].getStr() == "path"
       check getOperation["parameters"][0]["required"].getBool() == true
+
+      let flatOperation = spec["paths"]["/flat-items/{id}"]["get"]
+      check flatOperation["parameters"][0]["name"].getStr() == "id"
+      check flatOperation["parameters"][0]["in"].getStr() == "path"
+      check flatOperation["parameters"][1]["name"].getStr() == "verbose"
+      check flatOperation["parameters"][1]["in"].getStr() == "query"
+      check flatOperation["parameters"][1]["required"].getBool() == false
 
       let unnamedOperation = spec["paths"]["/unnamed-tuple"]["get"]
       check unnamedOperation["parameters"][0]["name"].getStr() == "0"

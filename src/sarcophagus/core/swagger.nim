@@ -163,6 +163,15 @@ proc parameterSchemas*[T](path: string, target: typedesc[T]): JsonNode =
   else:
     discard
 
+proc parameterSchema*[T](path, name: string, target: typedesc[T]): JsonNode =
+  let isPathParam = path.pathHasParam(name)
+  let location = if isPathParam: "path" else: "query"
+  result = %*{"name": name, "in": location, "schema": openApiSchema(T)}
+  when apiRequiredField(T):
+    result["required"] = newJBool(true)
+  else:
+    result["required"] = newJBool(isPathParam)
+
 proc parameterSchemas*[Params, Body](
     path: string, target: typedesc[ApiRequest[Params, Body]]
 ): JsonNode =
@@ -231,6 +240,36 @@ proc endpointOperation*[In, Out](
       "500": {"description": "Internal server error"},
     }
 
+proc endpointOperationWithParams*[Out](
+    httpMethod, path: string,
+    meta: EndpointMeta,
+    parameters: JsonNode,
+    output: typedesc[Out],
+): JsonNode =
+  result = newJObject()
+  result["operationId"] =
+    %(
+      if meta.operationId.len > 0: meta.operationId
+      else: defaultOperationId(httpMethod, path)
+    )
+  if meta.summary.len > 0:
+    result["summary"] = %meta.summary
+  if meta.description.len > 0:
+    result["description"] = %meta.description
+  if meta.tags.len > 0:
+    result["tags"] = %meta.tags
+  if parameters.len > 0:
+    result["parameters"] = parameters
+  result["responses"] =
+    %*{
+      $meta.responseStatus: {
+        "description": "Successful response",
+        "content": contentSchema(responseOpenApiSchema(Out)),
+      },
+      "400": {"description": "Invalid request"},
+      "500": {"description": "Internal server error"},
+    }
+
 proc addEndpoint*[In, Out](
     paths: JsonNode,
     httpMethod, path: string,
@@ -244,6 +283,19 @@ proc addEndpoint*[In, Out](
     paths[apiPath] = newJObject()
   paths[apiPath][httpMethod.toLowerAscii()] =
     endpointOperation(httpMethod, path, source, meta, In, Out)
+
+proc addEndpointWithParams*[Out](
+    paths: JsonNode,
+    httpMethod, path: string,
+    meta: EndpointMeta,
+    parameters: JsonNode,
+    output: typedesc[Out],
+) =
+  let apiPath = openApiPath(path)
+  if apiPath notin paths:
+    paths[apiPath] = newJObject()
+  paths[apiPath][httpMethod.toLowerAscii()] =
+    endpointOperationWithParams(httpMethod, path, meta, parameters, Out)
 
 proc openApiJson*(title, version: string, paths: JsonNode): JsonNode =
   %*{"openapi": "3.1.0", "info": {"title": title, "version": version}, "paths": paths}

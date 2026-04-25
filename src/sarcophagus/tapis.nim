@@ -122,16 +122,24 @@ proc requestParamForField(request: Request, name: string): Option[string] =
     if result.isSome():
       return
 
+proc parseRequestParamValue*[T](
+    request: Request, name: string, target: typedesc[T]
+): T =
+  let raw = request.requestParamForField(name)
+  if raw.isSome():
+    parseApiParam(raw.get(), name, T)
+  else:
+    missingApiParam(name, T)
+
+proc parseRequestParamValue*[T](request: Request, name: string): T =
+  parseRequestParamValue(request, name, T)
+
 proc parseRequestParams*[T](request: Request, target: typedesc[T]): T =
   when T is EmptyInput or T is EmptyParams or T is EmptyBody:
     discard
   elif T is object or T is tuple:
     for name, value in result.fieldPairs:
-      let raw = request.requestParamForField(name)
-      if raw.isSome():
-        value = parseApiParam(raw.get(), name, typeof(value))
-      else:
-        value = missingApiParam(name, typeof(value))
+      value = parseRequestParamValue(request, name, typeof(value))
   else:
     {.error: "API parameter input must be an object or tuple type".}
 
@@ -183,6 +191,36 @@ proc addEndpoint*[In, Out](
     output: typedesc[Out],
 ) =
   swagger.addEndpoint(api.paths, httpMethod, path, source, meta, In, Out)
+
+proc newParameterSchemas*(): JsonNode =
+  newJArray()
+
+proc addParameterSchema*[T](
+    parameters: JsonNode, path, name: string, target: typedesc[T]
+) =
+  parameters.add swagger.parameterSchema(path, name, T)
+
+proc addParameterSchema*[T](parameters: JsonNode, path, name: string) =
+  addParameterSchema(parameters, path, name, T)
+
+proc addEndpointWithParams*[Out](
+    api: ApiRouter,
+    httpMethod, path: string,
+    meta: EndpointMeta,
+    parameters: JsonNode,
+    output: typedesc[Out],
+) =
+  swagger.addEndpointWithParams(api.paths, httpMethod, path, meta, parameters, Out)
+
+proc addEndpointWithParams*[Out](
+    api: ApiRouter, httpMethod, path: string, meta: EndpointMeta, parameters: JsonNode
+) =
+  addEndpointWithParams(api, httpMethod, path, meta, parameters, Out)
+
+proc addRequestHandler*(
+    api: ApiRouter, httpMethod, path: string, handler: RequestHandler
+) =
+  api.router.addRoute(httpMethod, path, handler)
 
 proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =
   let statusCode = apiErrorStatus(e)
@@ -288,6 +326,203 @@ proc route*[In, Out](
     httpMethod, path, toApiHandler(handler, api.config, source, meta.responseStatus)
   )
 
+type HandlerParam = object
+  name: string
+  typeNode: NimNode
+
+proc typeName(node: NimNode): string =
+  case node.kind
+  of nnkIdent, nnkSym:
+    $node
+  of nnkOpenSymChoice, nnkClosedSymChoice:
+    if node.len > 0:
+      typeName(node[0])
+    else:
+      ""
+  of nnkBracketExpr:
+    if node.len > 0:
+      typeName(node[0])
+    else:
+      ""
+  of nnkDotExpr:
+    if node.len > 0:
+      typeName(node[^1])
+    else:
+      ""
+  else:
+    ""
+
+proc isRequestType(node: NimNode): bool =
+  node.typeName() == "Request"
+
+proc isParamsType(node: NimNode): bool =
+  node.typeName().normalize() == "params"
+
+proc isApiRequestType(node: NimNode): bool =
+  node.typeName() == "ApiRequest"
+
+proc isGroupedValueType(node: NimNode): bool =
+  if node.isRequestType():
+    return false
+
+  case node.typeName()
+  of "tuple":
+    return true
+  of "Option":
+    return false
+  else:
+    discard
+
+  case node.kind
+  of nnkTupleTy, nnkTupleConstr:
+    return true
+  else:
+    node.getTypeImpl().kind in {nnkObjectTy, nnkTupleTy}
+
+proc handlerSignature(
+    handler: NimNode
+): tuple[returnType: NimNode, params: seq[HandlerParam]] =
+  let impl = handler.getImpl()
+  if impl.kind notin {nnkProcDef, nnkFuncDef} or impl.len < 4 or
+      impl[3].kind != nnkFormalParams:
+    error("expected a proc handler", handler)
+
+  let formalParams = impl[3]
+  result.returnType = formalParams[0].copyNimTree()
+  for index in 1 ..< formalParams.len:
+    let identDefs = formalParams[index]
+    if identDefs.kind != nnkIdentDefs or identDefs.len < 3:
+      continue
+
+    let paramType = identDefs[^2]
+    for nameIndex in 0 ..< identDefs.len - 2:
+      var param: HandlerParam
+      param.name = $identDefs[nameIndex]
+      param.typeNode = paramType.copyNimTree()
+      result.params.add param
+
+proc sourceName(node: NimNode): string =
+  node.typeName().normalize()
+
+proc canUseDirectRoute(params: seq[HandlerParam], source: NimNode): bool =
+  let source = source.sourceName()
+  if params.len == 0:
+    return true
+  if params.len == 1:
+    return
+      params[0].typeNode.isRequestType() or params[0].typeNode.isParamsType() or
+      params[0].typeNode.isApiRequestType() or source == "adsbody"
+  params.len == 2 and params[0].typeNode.isRequestType() and (
+    params[1].typeNode.isParamsType() or params[1].typeNode.isApiRequestType() or
+    source == "adsbody"
+  )
+
+proc flatParamStart(params: seq[HandlerParam]): int =
+  if params.len > 0 and params[0].typeNode.isRequestType(): 1 else: 0
+
+proc buildRouteHandler(
+    api: NimNode,
+    httpMethod: NimNode,
+    path: NimNode,
+    handler: NimNode,
+    source: NimNode,
+    meta: NimNode,
+): NimNode =
+  let signature = handler.handlerSignature()
+  let handlerTarget =
+    case handler.kind
+    of nnkIdent, nnkSym:
+      ident($handler)
+    else:
+      handler.copyNimTree()
+  if signature.params.canUseDirectRoute(source):
+    return newCall(bindSym"route", api, httpMethod, path, handlerTarget, source, meta)
+
+  let start = signature.params.flatParamStart()
+  if start >= signature.params.len:
+    error("flat TAPIS handlers need at least one request parameter", handler)
+
+  if source.sourceName() != "adsparams":
+    error("flat TAPIS handlers currently decode path/query parameters only", handler)
+
+  let returnType = signature.returnType
+  let requestType = bindSym"Request"
+  let respondRouteValueSym = bindSym"respondRouteValue"
+  let wrapperName = genSym(nskProc, "tapisWrapper")
+  let requestName = genSym(nskParam, "request")
+  let routeMeta = genSym(nskLet, "routeMeta")
+  let routeConfig = genSym(nskLet, "routeConfig")
+  let routeStatus = genSym(nskLet, "routeStatus")
+  let parametersName = genSym(nskVar, "parameters")
+  var parseStmts = newStmtList()
+  var schemaStmts = newStmtList()
+  var callArgs: seq[NimNode]
+
+  if start == 1:
+    callArgs.add requestName
+
+  for index in start ..< signature.params.len:
+    let param = signature.params[index]
+    if param.typeNode.isGroupedValueType():
+      error("grouped path/query parameters must use Params[T]", param.typeNode)
+
+    let valueName = genSym(nskLet, param.name)
+    let paramName = newLit(param.name)
+    let paramType = param.typeNode.copyNimTree()
+    let parseCall = newCall(
+      newTree(nnkBracketExpr, bindSym"parseRequestParamValue", paramType.copyNimTree()),
+      requestName,
+      paramName,
+    )
+    let schemaCall = newCall(
+      newTree(nnkBracketExpr, bindSym"addParameterSchema", paramType.copyNimTree()),
+      parametersName,
+      path,
+      paramName,
+    )
+    parseStmts.add quote do:
+      let `valueName` = `parseCall`
+    schemaStmts.add schemaCall
+    callArgs.add valueName
+
+  let handlerCall = newCall(handlerTarget, callArgs)
+  let addEndpointCall = newCall(
+    newTree(nnkBracketExpr, bindSym"addEndpointWithParams", returnType.copyNimTree()),
+    api,
+    httpMethod,
+    path,
+    routeMeta,
+    parametersName,
+  )
+  result = quote:
+    block:
+      let `routeMeta` = `meta`
+      let `routeConfig` = `api`.config
+      let `routeStatus` = `routeMeta`.responseStatus
+      var `parametersName` = newParameterSchemas()
+      `schemaStmts`
+      `addEndpointCall`
+      proc `wrapperName`(`requestName`: `requestType`) {.gcsafe.} =
+        try:
+          `parseStmts`
+          `respondRouteValueSym`(
+            `requestName`, `handlerCall`, `routeConfig`, `routeStatus`
+          )
+        except CatchableError as e:
+          `requestName`.respondApiError(e, `routeConfig`)
+
+      addRequestHandler(`api`, `httpMethod`, `path`, `wrapperName`)
+
+macro routeHandler*(
+    api: typed,
+    httpMethod: typed,
+    path: typed,
+    handler: typed,
+    source: typed,
+    meta: typed,
+): untyped =
+  buildRouteHandler(api, httpMethod, path, handler, source, meta)
+
 template defineApiMethod(name, httpMethod, source: untyped) =
   template name*(
       api: ApiRouter,
@@ -299,7 +534,7 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       tags: openArray[string] = [],
       responseStatus: int = 200,
   ): untyped =
-    route(
+    routeHandler(
       api,
       httpMethod,
       path,
@@ -340,30 +575,39 @@ proc findTapiPragma(impl: NimNode): NimNode =
       if callName(pragma[0]) == "tapi":
         return pragma
 
-proc httpMethodSource(methodNode: NimNode): tuple[meth, source: string] =
-  case callName(methodNode).normalize()
-  of "get":
-    ("GET", "adsParams")
-  of "head":
-    ("HEAD", "adsParams")
-  of "delete":
-    ("DELETE", "adsParams")
-  of "post":
-    ("POST", "adsBody")
-  of "put":
-    ("PUT", "adsBody")
-  of "patch":
-    ("PATCH", "adsBody")
-  of "options":
-    ("OPTIONS", "adsNone")
-  else:
-    error("unsupported TAPIS HTTP method: " & methodNode.repr, methodNode)
-
 proc tapiArg(pragma: NimNode, index: int, fallback: NimNode): NimNode =
   if pragma.len > index:
     pragma[index].copyNimTree()
   else:
     fallback
+
+proc staticStringArg(node: NimNode): NimNode =
+  case node.kind
+  of nnkStrLit .. nnkTripleStrLit:
+    result = newLit(node.strVal)
+  else:
+    result = node.copyNimTree()
+
+proc staticIntArg(node: NimNode): NimNode =
+  case node.kind
+  of nnkIntLit .. nnkUInt64Lit:
+    result = newLit(node.intVal())
+  else:
+    result = node.copyNimTree()
+
+proc staticTagsArg(node: NimNode): NimNode =
+  case node.kind
+  of nnkBracket:
+    result = newTree(nnkBracket)
+    for child in node:
+      result.add staticStringArg(child)
+  of nnkHiddenSubConv, nnkHiddenStdConv:
+    if node.len > 0:
+      result = staticTagsArg(node[^1])
+    else:
+      result = newTree(nnkBracket)
+  else:
+    result = node.copyNimTree()
 
 macro add*(api: typed, handler: typed): untyped =
   let pragma = findTapiPragma(handler.getImpl())
@@ -373,24 +617,35 @@ macro add*(api: typed, handler: typed): untyped =
   if pragma.len < 3:
     error("tapi pragma requires an HTTP method and path", pragma)
 
-  let methodInfo = httpMethodSource(pragma[1])
-  let path = pragma[2].copyNimTree()
-  let summary = tapiArg(pragma, 3, newLit(""))
-  let description = tapiArg(pragma, 4, newLit(""))
-  let operationId = tapiArg(pragma, 5, newLit(""))
-  let tags = tapiArg(pragma, 6, newTree(nnkBracket))
-  let responseStatus = tapiArg(pragma, 7, newLit(200))
+  let methodNameValue = callName(pragma[1]).normalize()
+  case methodNameValue
+  of "get", "head", "delete", "post", "put", "patch", "options":
+    discard
+  else:
+    error("unsupported TAPIS HTTP method: " & pragma[1].repr, pragma[1])
+  let methodName = ident(methodNameValue)
+  let path = staticStringArg(pragma[2])
+  let summary = staticStringArg(tapiArg(pragma, 3, newLit("")))
+  let description = staticStringArg(tapiArg(pragma, 4, newLit("")))
+  let operationId = staticStringArg(tapiArg(pragma, 5, newLit("")))
+  let tags = staticTagsArg(tapiArg(pragma, 6, newTree(nnkBracket)))
+  let responseStatus = staticIntArg(tapiArg(pragma, 7, newLit(200)))
+  let handlerTarget =
+    case handler.kind
+    of nnkIdent, nnkSym:
+      ident($handler)
+    else:
+      handler.copyNimTree()
 
   result = newCall(
-    bindSym"route",
-    api,
-    newLit(methodInfo.meth),
+    newDotExpr(api, methodName),
     path,
-    handler,
-    ident(methodInfo.source),
-    newCall(
-      bindSym"endpointMeta", summary, description, operationId, tags, responseStatus
-    ),
+    handlerTarget,
+    summary,
+    description,
+    operationId,
+    tags,
+    responseStatus,
   )
 
 template options*(

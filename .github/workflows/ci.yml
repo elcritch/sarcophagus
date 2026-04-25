@@ -25,5 +25,5 @@ jobs:
       - run: nimble install "https://github.com/nim-lang/atlas@#head"
       - run: atlas -v
       - run: atlas init
-      - run: atlas install --feature:test
+      - run: atlas install --feature:cbor --feature:jsony
       - run: nim test
