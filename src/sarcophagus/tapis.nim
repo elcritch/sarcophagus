@@ -4,8 +4,9 @@ import mummy
 import mummy/routers
 
 import ./core/[swagger, typed_api]
+import ./tapis_security
 
-export swagger, typed_api
+export swagger, typed_api, tapis_security
 
 type ApiRouter* = ref object
   router*: Router
@@ -13,6 +14,7 @@ type ApiRouter* = ref object
   title*: string
   version*: string
   paths: JsonNode
+  components: JsonNode
 
 template tapi*(
   httpMethod: untyped,
@@ -27,7 +29,13 @@ template tapi*(
 proc initApiRouter*(
     title = "API", version = "0.1.0", config = defaultApiConfig()
 ): ApiRouter =
-  ApiRouter(config: config, title: title, version: version, paths: newJObject())
+  ApiRouter(
+    config: config,
+    title: title,
+    version: version,
+    paths: newJObject(),
+    components: newJObject(),
+  )
 
 proc apiResponse*[T](
     body: sink T, statusCode = 200, headers: sink HttpHeaders
@@ -190,6 +198,7 @@ proc addEndpoint*[In, Out](
     input: typedesc[In],
     output: typedesc[Out],
 ) =
+  api.components.addOpenApiSecuritySchemes(meta.security)
   swagger.addEndpoint(api.paths, httpMethod, path, source, meta, In, Out)
 
 proc newParameterSchemas*(): JsonNode =
@@ -210,6 +219,7 @@ proc addEndpointWithParams*[Out](
     parameters: JsonNode,
     output: typedesc[Out],
 ) =
+  api.components.addOpenApiSecuritySchemes(meta.security)
   swagger.addEndpointWithParams(api.paths, httpMethod, path, meta, parameters, Out)
 
 proc addEndpointWithParams*[Out](
@@ -287,7 +297,11 @@ proc route*[Out](
 ) =
   api.addEndpoint(httpMethod, path, source, meta, EmptyInput, Out)
   api.router.addRoute(
-    httpMethod, path, toApiHandler(handler, api.config, meta.responseStatus)
+    httpMethod,
+    path,
+    secureRequestHandler(
+      toApiHandler(handler, api.config, meta.responseStatus), meta.security
+    ),
   )
 
 proc route*[Out](
@@ -299,7 +313,11 @@ proc route*[Out](
 ) =
   api.addEndpoint(httpMethod, path, source, meta, EmptyInput, Out)
   api.router.addRoute(
-    httpMethod, path, toApiHandler(handler, api.config, meta.responseStatus)
+    httpMethod,
+    path,
+    secureRequestHandler(
+      toApiHandler(handler, api.config, meta.responseStatus), meta.security
+    ),
   )
 
 proc route*[In, Out](
@@ -311,7 +329,11 @@ proc route*[In, Out](
 ) =
   api.addEndpoint(httpMethod, path, source, meta, In, Out)
   api.router.addRoute(
-    httpMethod, path, toApiHandler(handler, api.config, source, meta.responseStatus)
+    httpMethod,
+    path,
+    secureRequestHandler(
+      toApiHandler(handler, api.config, source, meta.responseStatus), meta.security
+    ),
   )
 
 proc route*[In, Out](
@@ -323,7 +345,11 @@ proc route*[In, Out](
 ) =
   api.addEndpoint(httpMethod, path, source, meta, In, Out)
   api.router.addRoute(
-    httpMethod, path, toApiHandler(handler, api.config, source, meta.responseStatus)
+    httpMethod,
+    path,
+    secureRequestHandler(
+      toApiHandler(handler, api.config, source, meta.responseStatus), meta.security
+    ),
   )
 
 type HandlerParam = object
@@ -511,7 +537,12 @@ proc buildRouteHandler(
         except CatchableError as e:
           `requestName`.respondApiError(e, `routeConfig`)
 
-      addRequestHandler(`api`, `httpMethod`, `path`, `wrapperName`)
+      addRequestHandler(
+        `api`,
+        `httpMethod`,
+        `path`,
+        secureRequestHandler(`wrapperName`, `routeMeta`.security),
+      )
 
 macro routeHandler*(
     api: typed,
@@ -533,6 +564,7 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       operationId: string = "",
       tags: openArray[string] = [],
       responseStatus: int = 200,
+      security: ApiSecurity = noSecurity(),
   ): untyped =
     routeHandler(
       api,
@@ -540,7 +572,7 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       path,
       handler,
       source,
-      endpointMeta(summary, description, operationId, tags, responseStatus),
+      endpointMeta(summary, description, operationId, tags, responseStatus, security),
     )
 
 defineApiMethod(get, "GET", adsParams)
@@ -609,7 +641,7 @@ proc staticTagsArg(node: NimNode): NimNode =
   else:
     result = node.copyNimTree()
 
-macro add*(api: typed, handler: typed): untyped =
+macro add*(api: typed, handler: typed, security: typed = noSecurity()): untyped =
   let pragma = findTapiPragma(handler.getImpl())
   if pragma.isNil:
     error("api.add expects a handler annotated with {.tapi(...).}", handler)
@@ -646,6 +678,7 @@ macro add*(api: typed, handler: typed): untyped =
     operationId,
     tags,
     responseStatus,
+    security,
   )
 
 template options*(
@@ -657,6 +690,7 @@ template options*(
     operationId = "",
     tags: openArray[string] = [],
     responseStatus = 200,
+    security: ApiSecurity = noSecurity(),
 ): untyped =
   route(
     api,
@@ -664,11 +698,11 @@ template options*(
     path,
     handler,
     adsNone,
-    endpointMeta(summary, description, operationId, tags, responseStatus),
+    endpointMeta(summary, description, operationId, tags, responseStatus, security),
   )
 
 proc openApiJson*(api: ApiRouter): JsonNode =
-  swagger.openApiJson(api.title, api.version, api.paths)
+  swagger.openApiJson(api.title, api.version, api.paths, api.components)
 
 proc openApiHandler*(api: ApiRouter): RequestHandler =
   return proc(request: Request) {.gcsafe.} =

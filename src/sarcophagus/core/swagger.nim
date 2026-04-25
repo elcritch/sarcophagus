@@ -1,5 +1,6 @@
 import std/[json, options, strutils]
 
+import ./tapis_security
 import ./typed_api
 
 type EndpointMeta* = object
@@ -8,6 +9,7 @@ type EndpointMeta* = object
   operationId*: string
   tags*: seq[string]
   responseStatus*: int
+  security*: ApiSecurity
 
 proc endpointMeta*(
     summary = "",
@@ -15,6 +17,7 @@ proc endpointMeta*(
     operationId = "",
     tags: openArray[string] = [],
     responseStatus = 200,
+    security = noSecurity(),
 ): EndpointMeta =
   EndpointMeta(
     summary: summary,
@@ -22,6 +25,7 @@ proc endpointMeta*(
     operationId: operationId,
     tags: @tags,
     responseStatus: responseStatus,
+    security: security,
   )
 
 template apiRequiredField(T: typedesc): bool =
@@ -221,6 +225,9 @@ proc endpointOperation*[In, Out](
     result["description"] = %meta.description
   if meta.tags.len > 0:
     result["tags"] = %meta.tags
+  let security = openApiSecurityRequirement(meta.security)
+  if security.len > 0:
+    result["security"] = security
 
   let params = parameterSchemas(path, In)
   if params.len > 0:
@@ -258,6 +265,9 @@ proc endpointOperationWithParams*[Out](
     result["description"] = %meta.description
   if meta.tags.len > 0:
     result["tags"] = %meta.tags
+  let security = openApiSecurityRequirement(meta.security)
+  if security.len > 0:
+    result["security"] = security
   if parameters.len > 0:
     result["parameters"] = parameters
   result["responses"] =
@@ -299,3 +309,10 @@ proc addEndpointWithParams*[Out](
 
 proc openApiJson*(title, version: string, paths: JsonNode): JsonNode =
   %*{"openapi": "3.1.0", "info": {"title": title, "version": version}, "paths": paths}
+
+proc openApiJson*(
+    title, version: string, paths: JsonNode, components: JsonNode
+): JsonNode =
+  result = openApiJson(title, version, paths)
+  if components.len > 0:
+    result["components"] = components
