@@ -119,8 +119,7 @@ proc main() =
 
   let saved = authedGet(
     client,
-    baseUrl &
-      "/admin/gotos/new/save?url=https%3A%2F%2Fexample.test%2Fnotes&title=Notes",
+    baseUrl & "/admin/gotos/new/save?url=https%3A%2F%2Fexample.test%2Fnotes&title=Notes",
     writeToken,
   )
   printResponse("write-scoped save", saved)

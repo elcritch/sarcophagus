@@ -67,18 +67,20 @@ proc oauthConfig(): OAuth2Config =
   )
 
 proc health(): HealthResponse {.
-  gcsafe, tapi(get, "/health", summary = "Health check", tags = ["system"])
+    gcsafe, tapi(get, "/health", summary = "Health check", tags = ["system"])
 .} =
   HealthResponse(status: "ok")
 
-proc oauthToken(request: Request): ApiResponse[JsonNode] {.
-  gcsafe,
-  tapi(
-    post,
-    "/oauth/token",
-    summary = "Issue a client credentials token",
-    tags = ["auth"],
-  )
+proc oauthToken(
+    request: Request
+): ApiResponse[JsonNode] {.
+    gcsafe,
+    tapi(
+      post,
+      "/oauth/token",
+      summary = "Issue a client credentials token",
+      tags = ["auth"],
+    )
 .} =
   let tokenResult = issueClientCredentialsToken(
     oauthConfig(),
@@ -87,9 +89,7 @@ proc oauthToken(request: Request): ApiResponse[JsonNode] {.
     request.body,
   )
 
-  var headers: ApiHeaders = @[
-    ("Cache-Control", "no-store"), ("Pragma", "no-cache")
-  ]
+  var headers: ApiHeaders = @[("Cache-Control", "no-store"), ("Pragma", "no-cache")]
   if not tokenResult.ok:
     if tokenResult.failure.wwwAuthenticate.len > 0:
       headers.add(("WWW-Authenticate", tokenResult.failure.wwwAuthenticate))
@@ -101,36 +101,24 @@ proc oauthToken(request: Request): ApiResponse[JsonNode] {.
 
   apiResponse(tokenResult.response.toJson(), headers = headers)
 
-proc resolveGoto(slug: string, preview: Option[bool]): Goto {.
-  gcsafe,
-  tapi(
-    get,
-    "/go/@slug",
-    summary = "Resolve a goto slug",
-    tags = ["goto"],
-  )
+proc resolveGoto(
+    slug: string, preview: Option[bool]
+): Goto {.
+    gcsafe, tapi(get, "/go/@slug", summary = "Resolve a goto slug", tags = ["goto"])
 .} =
   for item in seedGotos():
     if item.slug == slug:
       if preview.get(false):
         return item
-      return Goto(
-        slug: item.slug,
-        url: item.url,
-        title: item.title,
-        visits: item.visits + 1,
-      )
+      return
+        Goto(slug: item.slug, url: item.url, title: item.title, visits: item.visits + 1)
 
   raiseApiError(404, "goto not found", "goto_not_found", details = %*{"slug": slug})
 
-proc listGotos(prefix: Option[string], limit: Option[int]): GotoList {.
-  gcsafe,
-  tapi(
-    get,
-    "/admin/gotos",
-    summary = "List goto links",
-    tags = ["admin"],
-  )
+proc listGotos(
+    prefix: Option[string], limit: Option[int]
+): GotoList {.
+    gcsafe, tapi(get, "/admin/gotos", summary = "List goto links", tags = ["admin"])
 .} =
   var items: seq[Goto]
   for item in seedGotos():
@@ -143,14 +131,11 @@ proc listGotos(prefix: Option[string], limit: Option[int]): GotoList {.
 
   GotoList(items: items, count: items.len)
 
-proc inspectGoto(slug: string): Goto {.
-  gcsafe,
-  tapi(
-    get,
-    "/admin/gotos/@slug",
-    summary = "Inspect a goto link",
-    tags = ["admin"],
-  )
+proc inspectGoto(
+    slug: string
+): Goto {.
+    gcsafe,
+    tapi(get, "/admin/gotos/@slug", summary = "Inspect a goto link", tags = ["admin"])
 .} =
   for item in seedGotos():
     if item.slug == slug:
@@ -158,14 +143,11 @@ proc inspectGoto(slug: string): Goto {.
 
   raiseApiError(404, "goto not found", "goto_not_found", details = %*{"slug": slug})
 
-proc saveGoto(slug: string, url: string, title: Option[string]): Goto {.
-  gcsafe,
-  tapi(
-    get,
-    "/admin/gotos/@slug/save",
-    summary = "Save a goto link",
-    tags = ["admin"],
-  )
+proc saveGoto(
+    slug: string, url: string, title: Option[string]
+): Goto {.
+    gcsafe,
+    tapi(get, "/admin/gotos/@slug/save", summary = "Save a goto link", tags = ["admin"])
 .} =
   if not (url.startsWith("https://") or url.startsWith("http://")):
     raiseApiError(
@@ -174,25 +156,18 @@ proc saveGoto(slug: string, url: string, title: Option[string]): Goto {.
 
   Goto(slug: slug, url: url, title: title.get(slug), visits: 0)
 
-proc deleteGoto(slug: string): MessageResponse {.
-  gcsafe,
-  tapi(
-    get,
-    "/admin/gotos/@slug/delete",
-    summary = "Delete a goto link",
-    tags = ["admin"],
-  )
+proc deleteGoto(
+    slug: string
+): MessageResponse {.
+    gcsafe,
+    tapi(
+      get, "/admin/gotos/@slug/delete", summary = "Delete a goto link", tags = ["admin"]
+    )
 .} =
   MessageResponse(status: "ok", message: "delete requested for " & slug)
 
 proc brokenRoute(): MessageResponse {.
-  gcsafe,
-  tapi(
-    get,
-    "/broken",
-    summary = "Example error response",
-    tags = ["system"],
-  )
+    gcsafe, tapi(get, "/broken", summary = "Example error response", tags = ["system"])
 .} =
   raise newException(ValueError, "simulated validation failure")
 
@@ -219,7 +194,8 @@ when isMainModule:
   let authConfig = oauthConfig()
   let readSecurity = oauth2(authConfig, ["goto:read"])
   let writeSecurity = oauth2(authConfig, ["goto:write"])
-  let apiRouter = initApiRouter("Sarcophagus TAPIS Secure Goto Example", "1.0.0", apiConfig)
+  let apiRouter =
+    initApiRouter("Sarcophagus TAPIS Secure Goto Example", "1.0.0", apiConfig)
 
   apiRouter.add(health)
   apiRouter.add(oauthToken)
