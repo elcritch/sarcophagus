@@ -58,8 +58,14 @@ proc readAddedItem(
 ): ItemOut {.tapi(get, "/added-items/@id", summary = "Read added item").} =
   ItemOut(id: id, name: "added-" & $id, verbose: false)
 
+proc readScopedAddedItem(
+    id: int
+): ItemOut {.tapi(get, "/scoped-added-items/@id", summary = "Read scoped added item").} =
+  ItemOut(id: id, name: "scoped-added-" & $id, verbose: false)
+
 proc buildApi(config: OAuth2Config): ApiRouter =
   let readSecurity = oauth2(config, ["items:read"])
+  let writeSecurity = oauth2(config, ["items:write"])
   let api = initApiRouter("TAPIS Security Test API", "1.0.0")
   api.get(
     "/secure-items/@id",
@@ -69,6 +75,17 @@ proc buildApi(config: OAuth2Config): ApiRouter =
     security = readSecurity,
   )
   api.add(readAddedItem, security = readSecurity)
+  withSecurity(api, readSecurity):
+    api.get("/scoped-items/@id", readItem, summary = "Read scoped item")
+    api.add(readScopedAddedItem)
+    api.get(
+      "/public-scoped-items/@id",
+      readItem,
+      summary = "Read public scoped item",
+      security = noSecurity(),
+    )
+    withSecurity(api, writeSecurity):
+      api.get("/write-scoped-items/@id", readItem, summary = "Read write scoped item")
   api.mountOpenApi()
   api
 
@@ -149,6 +166,70 @@ suite "typed mummy tapis security":
       check body["id"].getInt() == 8
       check body["name"].getStr() == "added-8"
 
+  test "applies scoped security to route blocks":
+    withTestServer do(baseUrl: string, readToken, writeToken: string):
+      discard writeToken
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let directUnauthenticated = client.get(baseUrl & "/scoped-items/9")
+      check directUnauthenticated.code.int == 401
+
+      let directAuthenticated = client.request(
+        baseUrl & "/scoped-items/9?verbose=true",
+        httpMethod = HttpGet,
+        headers = newHttpHeaders({"Authorization": "Bearer " & readToken}),
+      )
+      check directAuthenticated.code.int == 200
+      check parseJson(directAuthenticated.body)["name"].getStr() == "secure-9"
+
+      let addUnauthenticated = client.get(baseUrl & "/scoped-added-items/10")
+      check addUnauthenticated.code.int == 401
+
+      let addAuthenticated = client.request(
+        baseUrl & "/scoped-added-items/10",
+        httpMethod = HttpGet,
+        headers = newHttpHeaders({"Authorization": "Bearer " & readToken}),
+      )
+      check addAuthenticated.code.int == 200
+      check parseJson(addAuthenticated.body)["name"].getStr() == "scoped-added-10"
+
+  test "explicit route security overrides scoped security":
+    withTestServer do(baseUrl: string, readToken, writeToken: string):
+      discard readToken
+      discard writeToken
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let response = client.get(baseUrl & "/public-scoped-items/11")
+      check response.code.int == 200
+      check parseJson(response.body)["id"].getInt() == 11
+
+  test "inner scoped security overrides outer scoped security":
+    withTestServer do(baseUrl: string, readToken, writeToken: string):
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let unauthenticated = client.get(baseUrl & "/write-scoped-items/12")
+      check unauthenticated.code.int == 401
+
+      let outOfScope = client.request(
+        baseUrl & "/write-scoped-items/12",
+        httpMethod = HttpGet,
+        headers = newHttpHeaders({"Authorization": "Bearer " & readToken}),
+      )
+      check outOfScope.code.int == 403
+
+      let authenticated = client.request(
+        baseUrl & "/write-scoped-items/12",
+        httpMethod = HttpGet,
+        headers = newHttpHeaders({"Authorization": "Bearer " & writeToken}),
+      )
+      check authenticated.code.int == 200
+
   test "emits oauth2 security metadata in openapi":
     withTestServer do(baseUrl: string, readToken, writeToken: string):
       discard readToken
@@ -168,3 +249,15 @@ suite "typed mummy tapis security":
 
       let operation = spec["paths"]["/secure-items/{id}"]["get"]
       check operation["security"][0]["oauth2"][0].getStr() == "items:read"
+
+      let scopedOperation = spec["paths"]["/scoped-items/{id}"]["get"]
+      check scopedOperation["security"][0]["oauth2"][0].getStr() == "items:read"
+
+      let scopedAddOperation = spec["paths"]["/scoped-added-items/{id}"]["get"]
+      check scopedAddOperation["security"][0]["oauth2"][0].getStr() == "items:read"
+
+      let publicOperation = spec["paths"]["/public-scoped-items/{id}"]["get"]
+      check not publicOperation.hasKey("security")
+
+      let writeScopedOperation = spec["paths"]["/write-scoped-items/{id}"]["get"]
+      check writeScopedOperation["security"][0]["oauth2"][0].getStr() == "items:write"
