@@ -2,7 +2,7 @@ import std/[json, options, os, strutils]
 
 import mummy
 
-import sarcophagus/api
+import sarcophagus/tapis
 
 type
   PetStatus = enum
@@ -119,7 +119,7 @@ when isMainModule:
   config.includeStackTraces =
     getEnv("API_EXAMPLE_STACKTRACES", "") in ["1", "true", "yes"]
 
-  let apiRouter = initApiRouter("Sarcophagus Typed API Example", "1.0.0", config)
+  let apiRouter = initApiRouter("Sarcophagus TAPIS Example", "1.0.0", config)
 
   apiRouter.get("/health", health, summary = "Health check", tags = ["system"])
   apiRouter.get("/pets", listPets, summary = "List pets", tags = ["pets"])
@@ -135,6 +135,6 @@ when isMainModule:
   apiRouter.mountOpenApi()
 
   let server = newServer(apiRouter.router, workerThreads = 1)
-  echo "Typed API example server listening on http://", host, ":", port.int
+  echo "TAPIS example server listening on http://", host, ":", port.int
   echo "OpenAPI document: http://", host, ":", port.int, "/swagger.json"
   server.serve(port, address = host)

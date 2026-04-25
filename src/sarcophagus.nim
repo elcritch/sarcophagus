@@ -1,3 +1,3 @@
-import ./sarcophagus/[api, bearer_auth, oauth2]
+import ./sarcophagus/[bearer_auth, oauth2, tapis]
 
-export api, bearer_auth, oauth2
+export bearer_auth, oauth2, tapis

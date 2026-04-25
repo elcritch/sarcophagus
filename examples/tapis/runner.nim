@@ -7,14 +7,14 @@ proc repoRoot(): string =
   currentSourcePath.parentDir().parentDir().parentDir()
 
 proc compileServer(repoDir: string, serverBinary: string) =
-  let serverSource = repoDir / "examples" / "api" / "server.nim"
+  let serverSource = repoDir / "examples" / "tapis" / "server.nim"
   let compileResult = execCmdEx(
     "nim c -o:" & quoteShell(serverBinary) & " " & quoteShell(serverSource),
     options = {poUsePath, poStdErrToStdOut},
   )
   if compileResult.exitCode != 0:
     echo compileResult.output
-    quit("failed to compile examples/api/server.nim", QuitFailure)
+    quit("failed to compile examples/tapis/server.nim", QuitFailure)
 
 proc waitUntilReady(baseUrl: string) =
   var client = newHttpClient(timeout = 500)
@@ -53,7 +53,7 @@ when defined(feature.sarcophagus.cbor):
 
 proc main() =
   let repoDir = repoRoot()
-  let serverBinary = repoDir / "examples" / "api" / "server_bin"
+  let serverBinary = repoDir / "examples" / "tapis" / "server_bin"
   let port = 9082
   let baseUrl = fmt"http://127.0.0.1:{port}"
 
@@ -80,7 +80,7 @@ proc main() =
   defer:
     client.close()
 
-  echo "Typed API example runner talking to ", baseUrl
+  echo "TAPIS example runner talking to ", baseUrl
 
   let health = client.get(baseUrl & "/health")
   printResponse("health", health)
@@ -108,13 +108,13 @@ proc main() =
   printResponse("update pet from path params plus json body", updated)
 
   let notFound = client.get(baseUrl & "/pets/404")
-  printResponse("typed api error", notFound)
+  printResponse("typed tapis error", notFound)
 
   let invalidParam = client.get(baseUrl & "/pets/not-an-int")
   printResponse("invalid path param", invalidParam)
 
   let broken = client.get(baseUrl & "/broken")
-  printResponse("exception converted to api error", broken)
+  printResponse("exception converted to tapis error", broken)
 
   let swagger = client.get(baseUrl & "/swagger.json")
   let spec = parseJson(swagger.body)

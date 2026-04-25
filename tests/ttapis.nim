@@ -2,7 +2,7 @@ import std/[httpclient, json, options, random, unittest]
 
 import mummy
 
-import sarcophagus/api
+import sarcophagus/tapis
 
 when defined(feature.sarcophagus.cbor):
   import cborious
@@ -105,7 +105,7 @@ proc withTestServer(body: proc(baseUrl: string) {.gcsafe.}) =
   server.waitUntilReady()
   body("http://127.0.0.1:" & $portNumber)
 
-suite "typed mummy api":
+suite "typed mummy tapis":
   test "parses path and query params into typed objects":
     withTestServer do(baseUrl: string):
       var client = newHttpClient(timeout = 5_000)
