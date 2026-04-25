@@ -167,6 +167,77 @@ Use `security = ...` for one route:
 api.add(readItem, security = oauth2(config, ["items:read"]))
 ```
 
+If a route only needs a valid bearer token and does not require specific scopes,
+omit the scope list:
+
+```nim
+type UserInfo = object
+  status*: string
+  message*: string
+
+proc health(): HealthResponse {.
+  gcsafe, tapi(get, "/health", summary = "Health check", tags = ["system"])
+.} =
+  HealthResponse(status: "ok")
+
+proc currentUser(): UserInfo {.
+  gcsafe, tapi(get, "/me", summary = "Current authenticated user", tags = ["users"])
+.} =
+  UserInfo(status: "ok", message: "authenticated")
+
+let api = initApiRouter("Authenticated API", "1.0.0")
+let auth = oauth2(config)
+
+api.registerOAuth2(config)
+api.add(health)
+api.add(currentUser, security = auth)
+api.mountOpenApi()
+```
+
+That setup does not use `api.get`, `api.post`, or raw `router.get`/`router.post`
+registration. Route metadata stays on the proc via `tapi`, while `api.add`
+registers it and applies the OpenAPI-aware security wrapper.
+
+The same security model also works with explicit router-style TAPIS registration:
+
+```nim
+type
+  CreateItemBody = object
+    name*: string
+
+  ItemOut = object
+    id*: int
+    name*: string
+
+proc readItem(id: int): ItemOut {.gcsafe.} =
+  ItemOut(id: id, name: "item-" & $id)
+
+proc createItem(body: CreateItemBody): ApiResponse[ItemOut] {.gcsafe.} =
+  apiResponse(ItemOut(id: 100, name: body.name), statusCode = 201)
+
+let api = initApiRouter("Router Style API", "1.0.0")
+let readSecurity = oauth2(config)
+let writeSecurity = oauth2(config, ["items:write"])
+
+api.registerOAuth2(config)
+api.get(
+  "/items/@id",
+  readItem,
+  summary = "Read item",
+  tags = ["items"],
+  security = readSecurity,
+)
+api.post(
+  "/items",
+  createItem,
+  summary = "Create item",
+  tags = ["items"],
+  responseStatus = 201,
+  security = writeSecurity,
+)
+api.mountOpenApi()
+```
+
 Use `withSecurity` for route groups:
 
 ```nim
