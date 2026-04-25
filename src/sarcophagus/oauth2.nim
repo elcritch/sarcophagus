@@ -1,6 +1,7 @@
 import std/[json, macros]
 
 import mummy
+import mummy/routers
 
 import ./core/jwt_bearer_tokens
 import ./core/oauth2
@@ -82,6 +83,11 @@ proc oauth2TokenHandler*(
     headers["Cache-Control"] = "no-store"
     headers["Pragma"] = "no-cache"
     request.respondJson(200, $tokenResult.response.toJson(), headers)
+
+proc registerOAuth2*(
+    router: var Router, config: OAuth2Config, tokenPath = "/oauth/token"
+) =
+  router.post(tokenPath, oauth2TokenHandler(config))
 
 proc validateOAuth2BearerRequest*(
     request: Request, config: OAuth2Config, requiredScopes: openArray[string] = []

@@ -4,6 +4,8 @@ import mummy
 import mummy/routers
 
 import ./core/[swagger, typed_api]
+from ./core/oauth2 import OAuth2Config
+from ./oauth2 import oauth2TokenHandler
 import ./tapis_security
 
 export swagger, typed_api, tapis_security
@@ -231,6 +233,9 @@ proc addRequestHandler*(
     api: ApiRouter, httpMethod, path: string, handler: RequestHandler
 ) =
   api.router.addRoute(httpMethod, path, handler)
+
+proc registerOAuth2*(api: ApiRouter, config: OAuth2Config, tokenPath = "/oauth/token") =
+  api.router.post(tokenPath, oauth2TokenHandler(config))
 
 proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =
   let statusCode = apiErrorStatus(e)

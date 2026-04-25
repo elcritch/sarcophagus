@@ -67,6 +67,7 @@ proc buildApi(config: OAuth2Config): ApiRouter =
   let readSecurity = oauth2(config, ["items:read"])
   let writeSecurity = oauth2(config, ["items:write"])
   let api = initApiRouter("TAPIS Security Test API", "1.0.0")
+  api.registerOAuth2(config)
   api.get(
     "/secure-items/@id",
     readItem,
@@ -229,6 +230,30 @@ suite "typed mummy tapis security":
         headers = newHttpHeaders({"Authorization": "Bearer " & writeToken}),
       )
       check authenticated.code.int == 200
+
+  test "registers oauth2 token endpoint on typed api routers":
+    withTestServer do(baseUrl: string, readToken, writeToken: string):
+      discard readToken
+      discard writeToken
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let response = client.request(
+        baseUrl & "/oauth/token",
+        httpMethod = HttpPost,
+        headers = newHttpHeaders(
+          {
+            "Authorization": "Basic cmVhZGVyLWFwcDpzZWNyZXQtcmVhZGVy",
+            "Content-Type": "application/x-www-form-urlencoded",
+          }
+        ),
+        body = "grant_type=client_credentials&scope=items%3Aread",
+      )
+      check response.code.int == 200
+      let body = parseJson(response.body)
+      check body["token_type"].getStr() == "Bearer"
+      check body["scope"].getStr() == "items:read"
 
   test "emits oauth2 security metadata in openapi":
     withTestServer do(baseUrl: string, readToken, writeToken: string):

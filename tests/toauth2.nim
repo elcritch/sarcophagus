@@ -129,7 +129,7 @@ suite "mummy oauth2":
     let config = testConfig()
 
     var router: Router
-    router.post("/oauth/token", oauth2TokenHandler(config))
+    router.registerOAuth2(config)
     router.get("/claims", oauth2(claimsHandler, config, ["sync:read"]))
 
     let server = newServer(router, workerThreads = 1)

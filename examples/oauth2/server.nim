@@ -78,7 +78,7 @@ when isMainModule:
 
   var router: Router
   router.get("/health", healthHandler)
-  router.post("/oauth/token", oauth2TokenHandler(config))
+  router.registerOAuth2(config)
 
   router.get("/api/write", oauth2(writeHandler, config, {"sync": "write"}))
 

@@ -54,6 +54,7 @@ let writeSecurity = oauth2(authConfig, ["goto:write"])
 
 let api = initApiRouter("Sarcophagus TAPIS Secure Goto Example", "1.0.0")
 
+api.registerOAuth2(authConfig)
 api.add(resolveGoto)
 withSecurity(api, readSecurity):
   api.add(listGotos)
@@ -66,24 +67,11 @@ api.mountOpenApi()
 newServer(api.router).serve(Port(9083), address = "127.0.0.1")
 ```
 
-`examples/tapis_secure/server.nim` also exposes a TAPIS token route:
+`registerOAuth2` mounts the standard client-credentials token endpoint using the
+OAuth2 helper from `sarcophagus/oauth2`:
 
 ```nim
-proc oauthToken(request: Request): ApiResponse[JsonNode] {.
-  gcsafe, tapi(post, "/oauth/token", summary = "Issue a token", tags = ["auth"])
-.} =
-  let token = issueClientCredentialsToken(
-    oauthConfig(),
-    request.headers["Authorization"],
-    request.headers["Content-Type"],
-    request.body,
-  )
-  if not token.ok:
-    return apiResponse(
-      %*{"status": "error", "error": token.failure.toJson()},
-      statusCode = token.failure.statusCode,
-    )
-  apiResponse(token.response.toJson())
+api.registerOAuth2(authConfig)
 ```
 
 ## `sarcophagus/tapis`
@@ -96,6 +84,7 @@ Core pieces:
 - `initApiRouter(title, version, config)` creates a typed Mummy router wrapper.
 - `tapi(method, path, ...)` marks a proc as an API endpoint.
 - `api.add(handler)` registers a `tapi`-annotated proc.
+- `api.registerOAuth2(config)` mounts the standard `/oauth/token` endpoint.
 - `api.mountOpenApi()` mounts `/swagger.json`.
 - `ApiResponse[T]` lets a handler set status codes and headers.
 - `raiseApiError(status, message, code, details)` produces structured error JSON.
@@ -251,6 +240,7 @@ let validation = validateOAuth2BearerToken(
 `sarcophagus/oauth2` contains Mummy-oriented helpers for non-TAPIS handlers:
 
 - `oauth2TokenHandler(config)` returns a raw Mummy token endpoint handler.
+- `registerOAuth2(router, config)` mounts that token endpoint at `/oauth/token`.
 - `requireOAuth2BearerAuth(request, config, scopes)` validates a request in place.
 - `oauth2(handler, config, scopes)` wraps a raw handler.
 - `withOAuth2(config, scopes):` rewrites raw Mummy route registrations in a block.

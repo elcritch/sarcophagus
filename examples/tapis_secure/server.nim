@@ -71,36 +71,6 @@ proc health(): HealthResponse {.
 .} =
   HealthResponse(status: "ok")
 
-proc oauthToken(
-    request: Request
-): ApiResponse[JsonNode] {.
-    gcsafe,
-    tapi(
-      post,
-      "/oauth/token",
-      summary = "Issue a client credentials token",
-      tags = ["auth"],
-    )
-.} =
-  let tokenResult = issueClientCredentialsToken(
-    oauthConfig(),
-    request.headers["Authorization"],
-    request.headers["Content-Type"],
-    request.body,
-  )
-
-  var headers: ApiHeaders = @[("Cache-Control", "no-store"), ("Pragma", "no-cache")]
-  if not tokenResult.ok:
-    if tokenResult.failure.wwwAuthenticate.len > 0:
-      headers.add(("WWW-Authenticate", tokenResult.failure.wwwAuthenticate))
-    return apiResponse(
-      %*{"status": "error", "error": tokenResult.failure.toJson()},
-      statusCode = tokenResult.failure.statusCode,
-      headers = headers,
-    )
-
-  apiResponse(tokenResult.response.toJson(), headers = headers)
-
 proc resolveGoto(
     slug: string, preview: Option[bool]
 ): Goto {.
@@ -197,8 +167,8 @@ when isMainModule:
   let apiRouter =
     initApiRouter("Sarcophagus TAPIS Secure Goto Example", "1.0.0", apiConfig)
 
+  apiRouter.registerOAuth2(authConfig)
   apiRouter.add(health)
-  apiRouter.add(oauthToken)
   apiRouter.add(resolveGoto)
   withSecurity(apiRouter, readSecurity):
     apiRouter.add(listGotos)
