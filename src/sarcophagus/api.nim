@@ -12,6 +12,7 @@ else:
 when defined(feature.sarcophagus.cbor):
   import cborious
   import cborious/cbor2json
+  export cborious
 
 type
   ApiFormat* = enum
