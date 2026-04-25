@@ -54,6 +54,22 @@ proc getItem(params: GetItemParams): ItemOut {.gcsafe.} =
     id: params.id, name: "item-" & $params.id, count: 1, verbose: verbose, mode: mode
   )
 
+proc getNamedTupleItem(
+    params: tuple[id: int, verbose: Option[bool]]
+): ItemOut {.gcsafe.} =
+  ItemOut(
+    id: params.id,
+    name: "tuple-" & $params.id,
+    count: 1,
+    verbose: params.verbose.get(false),
+    mode: "",
+  )
+
+proc getUnnamedTupleItem(
+    params: (int, string)
+): tuple[id: int, label: string] {.gcsafe.} =
+  (id: params[0], label: params[1])
+
 proc createItem(body: ItemBody): ApiResponse[ItemOut] {.gcsafe.} =
   apiResponse(
     ItemOut(id: 42, name: body.name, count: body.count, verbose: false, mode: ""),
@@ -83,6 +99,8 @@ proc buildApi(includeStackTraces = false): ApiRouter =
   api.get("/items/@id", getItem, summary = "Get item", tags = ["items"])
   api.post("/items", createItem, summary = "Create item", responseStatus = 201)
   api.put("/items/@id", upsertItem, summary = "Upsert item")
+  api.get("/tuple-items/@id", getNamedTupleItem, summary = "Get tuple item")
+  api.get("/unnamed-tuple", getUnnamedTupleItem, summary = "Get unnamed tuple")
   api.get("/value-error", valueErrorHandler)
   api.get("/api-error", apiErrorHandler)
   api.mountOpenApi()
@@ -119,6 +137,33 @@ suite "typed mummy tapis":
       check body["id"].getInt() == 7
       check body["verbose"].getBool() == true
       check body["mode"].getStr() == "modeFast"
+
+  test "parses named tuple query params without declaring an object type":
+    withTestServer do(baseUrl: string):
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let response = client.get(baseUrl & "/tuple-items/13?verbose=true")
+      check response.code.int == 200
+
+      let body = parseJson(response.body)
+      check body["id"].getInt() == 13
+      check body["name"].getStr() == "tuple-13"
+      check body["verbose"].getBool() == true
+
+  test "parses unnamed tuple query params by index aliases":
+    withTestServer do(baseUrl: string):
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let response = client.get(baseUrl & "/unnamed-tuple?0=21&1=soil")
+      check response.code.int == 200
+
+      let body = parseJson(response.body)
+      check body[0].getInt() == 21
+      check body[1].getStr() == "soil"
 
   test "parses json request bodies and response metadata":
     withTestServer do(baseUrl: string):
@@ -204,6 +249,10 @@ suite "typed mummy tapis":
       check getOperation["parameters"][0]["name"].getStr() == "id"
       check getOperation["parameters"][0]["in"].getStr() == "path"
       check getOperation["parameters"][0]["required"].getBool() == true
+
+      let unnamedOperation = spec["paths"]["/unnamed-tuple"]["get"]
+      check unnamedOperation["parameters"][0]["name"].getStr() == "0"
+      check unnamedOperation["parameters"][1]["name"].getStr() == "1"
 
       let postOperation = spec["paths"]["/items"]["post"]
       check postOperation["requestBody"]["required"].getBool() == true

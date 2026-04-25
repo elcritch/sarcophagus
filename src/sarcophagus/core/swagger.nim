@@ -101,6 +101,21 @@ proc pathHasParam*(path, name: string): bool =
       return true
   false
 
+proc tupleFieldIndex(name: string): string =
+  if not name.startsWith("Field") or name.len <= "Field".len:
+    return ""
+
+  result = name["Field".len .. ^1]
+  for ch in result:
+    if ch notin {'0' .. '9'}:
+      return ""
+
+proc apiParamName*(name: string): string =
+  let index = tupleFieldIndex(name)
+  if index.len > 0:
+    return index
+  name
+
 proc openApiPath*(path: string): string =
   let parts = path.split('/')
   for index in 0 ..< parts.len:
@@ -135,10 +150,11 @@ proc parameterSchemas*[T](path: string, target: typedesc[T]): JsonNode =
     discard
   elif T is object or T is tuple:
     for name, value in default(T).fieldPairs:
-      let isPathParam = path.pathHasParam(name)
+      let paramName = apiParamName(name)
+      let isPathParam = path.pathHasParam(name) or path.pathHasParam(paramName)
       let location = if isPathParam: "path" else: "query"
       var param =
-        %*{"name": name, "in": location, "schema": openApiSchema(typeof(value))}
+        %*{"name": paramName, "in": location, "schema": openApiSchema(typeof(value))}
       when apiRequiredField(typeof(value)):
         param["required"] = newJBool(true)
       else:

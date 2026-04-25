@@ -1,4 +1,4 @@
-import std/[json, options]
+import std/[json, options, strutils]
 
 import mummy
 import mummy/routers
@@ -88,18 +88,42 @@ proc requestParam(request: Request, name: string): Option[string] =
     return some(request.queryParams[name])
   none(string)
 
+proc tupleFieldIndex(name: string): Option[string] =
+  if not name.startsWith("Field") or name.len <= "Field".len:
+    return none(string)
+
+  let index = name["Field".len .. ^1]
+  for ch in index:
+    if ch notin {'0' .. '9'}:
+      return none(string)
+  some(index)
+
+proc requestParamForField(request: Request, name: string): Option[string] =
+  result = request.requestParam(name)
+  if result.isSome():
+    return
+
+  let index = tupleFieldIndex(name)
+  if index.isNone():
+    return
+
+  for alias in [index.get(), "p" & index.get(), "arg" & index.get()]:
+    result = request.requestParam(alias)
+    if result.isSome():
+      return
+
 proc parseRequestParams*[T](request: Request, target: typedesc[T]): T =
   when T is EmptyInput or T is EmptyParams or T is EmptyBody:
     discard
-  elif T is object:
+  elif T is object or T is tuple:
     for name, value in result.fieldPairs:
-      let raw = request.requestParam(name)
+      let raw = request.requestParamForField(name)
       if raw.isSome():
         value = parseApiParam(raw.get(), name, typeof(value))
       else:
         value = missingApiParam(name, typeof(value))
   else:
-    {.error: "API parameter input must be an object type".}
+    {.error: "API parameter input must be an object or tuple type".}
 
 proc decodeRequestBody*[T](
     request: Request, config: ApiConfig, target: typedesc[T]
