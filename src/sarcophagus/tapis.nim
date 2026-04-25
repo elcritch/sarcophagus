@@ -1,4 +1,4 @@
-import std/[json, options, strutils]
+import std/[json, macros, options, strutils]
 
 import mummy
 import mummy/routers
@@ -13,6 +13,16 @@ type ApiRouter* = ref object
   title*: string
   version*: string
   paths: JsonNode
+
+template tapi*(
+  httpMethod: untyped,
+  path: static string,
+  summary: static string = "",
+  description: static string = "",
+  operationId: static string = "",
+  tags: static openArray[string] = [],
+  responseStatus: static int = 200,
+) {.pragma.}
 
 proc initApiRouter*(
     title = "API", version = "0.1.0", config = defaultApiConfig()
@@ -304,6 +314,84 @@ defineApiMethod(delete, "DELETE", adsParams)
 defineApiMethod(post, "POST", adsBody)
 defineApiMethod(put, "PUT", adsBody)
 defineApiMethod(patch, "PATCH", adsBody)
+
+proc callName(node: NimNode): string =
+  case node.kind
+  of nnkIdent, nnkSym:
+    $node
+  of nnkOpenSymChoice, nnkClosedSymChoice:
+    if node.len > 0:
+      callName(node[0])
+    else:
+      ""
+  else:
+    ""
+
+proc findTapiPragma(impl: NimNode): NimNode =
+  if impl.kind notin {nnkProcDef, nnkFuncDef, nnkIteratorDef}:
+    return nil
+
+  let pragmas = impl[4]
+  if pragmas.kind != nnkPragma:
+    return nil
+
+  for pragma in pragmas:
+    if pragma.kind in {nnkCall, nnkCommand} and pragma.len > 0:
+      if callName(pragma[0]) == "tapi":
+        return pragma
+
+proc httpMethodSource(methodNode: NimNode): tuple[meth, source: string] =
+  case callName(methodNode).normalize()
+  of "get":
+    ("GET", "adsParams")
+  of "head":
+    ("HEAD", "adsParams")
+  of "delete":
+    ("DELETE", "adsParams")
+  of "post":
+    ("POST", "adsBody")
+  of "put":
+    ("PUT", "adsBody")
+  of "patch":
+    ("PATCH", "adsBody")
+  of "options":
+    ("OPTIONS", "adsNone")
+  else:
+    error("unsupported TAPIS HTTP method: " & methodNode.repr, methodNode)
+
+proc tapiArg(pragma: NimNode, index: int, fallback: NimNode): NimNode =
+  if pragma.len > index:
+    pragma[index].copyNimTree()
+  else:
+    fallback
+
+macro add*(api: typed, handler: typed): untyped =
+  let pragma = findTapiPragma(handler.getImpl())
+  if pragma.isNil:
+    error("api.add expects a handler annotated with {.tapi(...).}", handler)
+
+  if pragma.len < 3:
+    error("tapi pragma requires an HTTP method and path", pragma)
+
+  let methodInfo = httpMethodSource(pragma[1])
+  let path = pragma[2].copyNimTree()
+  let summary = tapiArg(pragma, 3, newLit(""))
+  let description = tapiArg(pragma, 4, newLit(""))
+  let operationId = tapiArg(pragma, 5, newLit(""))
+  let tags = tapiArg(pragma, 6, newTree(nnkBracket))
+  let responseStatus = tapiArg(pragma, 7, newLit(200))
+
+  result = newCall(
+    bindSym"route",
+    api,
+    newLit(methodInfo.meth),
+    path,
+    handler,
+    ident(methodInfo.source),
+    newCall(
+      bindSym"endpointMeta", summary, description, operationId, tags, responseStatus
+    ),
+  )
 
 template options*(
     api: ApiRouter,

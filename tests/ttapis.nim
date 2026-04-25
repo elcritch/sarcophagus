@@ -54,6 +54,24 @@ proc getItem(params: GetItemParams): ItemOut {.gcsafe.} =
     id: params.id, name: "item-" & $params.id, count: 1, verbose: verbose, mode: mode
   )
 
+# api.get("/read-items/@id", readItem, summary = "Read item", tags = ["items"])
+proc readItem(
+    params: GetItemParams
+): ItemOut {.tapi(get, "/read-items/@id", summary = "Read item", tags = ["items"]).} =
+  let verbose =
+    if params.verbose.isSome():
+      params.verbose.get()
+    else:
+      false
+  let mode =
+    if params.mode.isSome():
+      $params.mode.get()
+    else:
+      ""
+  ItemOut(
+    id: params.id, name: "read-" & $params.id, count: 1, verbose: verbose, mode: mode
+  )
+
 proc getNamedTupleItem(
     params: tuple[id: int, verbose: Option[bool]]
 ): ItemOut {.gcsafe.} =
@@ -97,6 +115,7 @@ proc buildApi(includeStackTraces = false): ApiRouter =
 
   let api = initApiRouter("Typed Test API", "1.2.3", config)
   api.get("/items/@id", getItem, summary = "Get item", tags = ["items"])
+  api.add(readItem)
   api.post("/items", createItem, summary = "Create item", responseStatus = 201)
   api.put("/items/@id", upsertItem, summary = "Upsert item")
   api.get("/tuple-items/@id", getNamedTupleItem, summary = "Get tuple item")
@@ -137,6 +156,21 @@ suite "typed mummy tapis":
       check body["id"].getInt() == 7
       check body["verbose"].getBool() == true
       check body["mode"].getStr() == "modeFast"
+
+  test "registers tapi pragma handlers with api.add":
+    withTestServer do(baseUrl: string):
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let response = client.get(baseUrl & "/read-items/8?verbose=true&mode=modeSlow")
+      check response.code.int == 200
+
+      let body = parseJson(response.body)
+      check body["id"].getInt() == 8
+      check body["name"].getStr() == "read-8"
+      check body["verbose"].getBool() == true
+      check body["mode"].getStr() == "modeSlow"
 
   test "parses named tuple query params without declaring an object type":
     withTestServer do(baseUrl: string):
