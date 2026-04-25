@@ -220,21 +220,8 @@ let readSecurity = oauth2(config)
 let writeSecurity = oauth2(config, ["items:write"])
 
 api.registerOAuth2(config)
-api.get(
-  "/items/@id",
-  readItem,
-  summary = "Read item",
-  tags = ["items"],
-  security = readSecurity,
-)
-api.post(
-  "/items",
-  createItem,
-  summary = "Create item",
-  tags = ["items"],
-  responseStatus = 201,
-  security = writeSecurity,
-)
+api.get( "/items/@id", readItem, summary = "Read item", tags = ["items"], security = readSecurity)
+api.post( "/items", createItem, summary = "Create item", tags = ["items"], responseStatus = 201, security = writeSecurity)
 api.mountOpenApi()
 ```
 
