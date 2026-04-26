@@ -19,14 +19,15 @@ type Item = object
   name*: string
   verbose*: bool
 
-proc readItem(id: int, verbose: Option[bool]): Item {.
-  tapi(get, "/items/@id", summary = "Read an item", tags = ["items"])
+proc readItem(
+    id: int, verbose: Option[bool]
+): Item {.tapi(get, "/items/@id", summary = "Read an item", tags = ["items"])
 .} =
   Item(id: id, name: "item-" & $id, verbose: verbose.get(false))
 
-proc createItem(item: Item): ApiResponse[Item] {.
-  tapi(post, "/items", summary = "Create an item", responseStatus = 201)
-.} =
+proc createItem(
+    item: Item
+): ApiResponse[Item] {.tapi(post, "/items", summary = "Create an item", responseStatus = 201).} =
   apiResponse(item, statusCode = 201)
 
 let api = initApiRouter("Example API", "1.0.0")
