@@ -7,9 +7,11 @@ import ./core/jwt_bearer_tokens
 type
   AuthErrorResponder* =
     proc(request: Request, failure: TokenValidationFailure) {.gcsafe.}
+    ## Callback used when bearer-token validation fails for a Mummy request.
 
   AuthenticatedRequestHandler* =
     proc(request: Request, claims: BearerTokenClaims) {.gcsafe.}
+    ## Mummy handler shape for endpoints that need validated bearer-token claims.
 
 const routeRegistrationNames =
   ["addRoute", "get", "head", "post", "put", "delete", "options", "patch"]
@@ -26,6 +28,7 @@ proc respondJson(request: Request, statusCode: int, body: string) =
 proc defaultAuthErrorResponder*(
     request: Request, failure: TokenValidationFailure
 ) {.gcsafe.} =
+  ## Writes a default JSON error response for bearer-token validation failures.
   let body =
     $(
       %*{"status": "error", "error": {"code": failure.code, "message": failure.message}}
@@ -35,6 +38,9 @@ proc defaultAuthErrorResponder*(
 proc validateBearerRequest*(
     request: Request, config: BearerTokenConfig, requiredScopes: openArray[string] = []
 ): TokenValidationResult {.gcsafe.} =
+  ## Validates the request's `Authorization: Bearer ...` token.
+  ##
+  ## `requiredScopes` must all be present in the token for validation to pass.
   let token = bearerTokenFromAuthorizationHeader(request.headers["Authorization"])
   validateBearerToken(config, token, requiredScopes)
 
@@ -44,6 +50,9 @@ proc requireBearerAuth*(
     requiredScopes: openArray[string] = [],
     onError: AuthErrorResponder = defaultAuthErrorResponder,
 ): bool {.gcsafe.} =
+  ## Validates bearer auth and writes an error response on failure.
+  ##
+  ## Returns true when the request may continue to the protected handler.
   let validation = validateBearerRequest(request, config, requiredScopes)
   if validation.ok:
     return true
@@ -57,6 +66,7 @@ proc bearerTokAuth*(
     requiredScopes: openArray[string],
     onError: AuthErrorResponder = defaultAuthErrorResponder,
 ): RequestHandler =
+  ## Wraps a plain Mummy handler with bearer-token authorization.
   let scopes = @requiredScopes
   return proc(request: Request) {.gcsafe.} =
     if not requireBearerAuth(request, config, scopes, onError):
@@ -69,6 +79,7 @@ proc bearerTokAuth*(
     requiredScopes: openArray[string],
     onError: AuthErrorResponder = defaultAuthErrorResponder,
 ): RequestHandler =
+  ## Wraps a Mummy handler and passes validated token claims to it.
   let scopes = @requiredScopes
   return proc(request: Request) {.gcsafe.} =
     let validation = validateBearerRequest(request, config, scopes)
@@ -115,4 +126,8 @@ proc rewriteWithBearerTokAuth(
       result[idx] = rewriteWithBearerTokAuth(result[idx], config, requiredScopes)
 
 macro withBearerTokAuth*(config: typed, requiredScopes: typed, body: untyped): untyped =
+  ## Applies `bearerTokAuth` to route registrations inside `body`.
+  ##
+  ## The macro rewrites Mummy route calls such as `router.get(...)` so their
+  ## handler argument is wrapped with bearer-token authorization.
   rewriteWithBearerTokAuth(body, config, requiredScopes)

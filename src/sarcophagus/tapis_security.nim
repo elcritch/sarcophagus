@@ -10,6 +10,10 @@ export tapis_security
 proc secureRequestHandler*(
     wrapped: RequestHandler, security: ApiSecurity
 ): RequestHandler =
+  ## Wraps a Mummy request handler with runtime enforcement for `ApiSecurity`.
+  ##
+  ## `apiSecurityNone` returns the handler unchanged. OAuth2 security validates
+  ## a bearer token and required scopes before calling `wrapped`.
   case security.kind
   of apiSecurityNone:
     wrapped
@@ -82,4 +86,8 @@ proc rewriteWithSecurity(node, api, security: NimNode): NimNode =
       result[index] = rewriteWithSecurity(result[index], api, security)
 
 macro withSecurity*(api: typed, security: typed, body: untyped): untyped =
+  ## Applies a default TAPIS security policy to route registrations in `body`.
+  ##
+  ## Calls such as `api.add(...)` and `api.get(...)` receive `security = ...`
+  ## unless they already specify an explicit security argument.
   rewriteWithSecurity(body, api, security)

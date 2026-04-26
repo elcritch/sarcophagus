@@ -11,10 +11,14 @@ import ./tapis_security
 export swagger, typed_api, tapis_security
 
 type ApiRouter* = ref object
-  router*: Router
-  config*: ApiConfig
-  title*: string
-  version*: string
+  ## Typed API router wrapper around a Mummy `Router`.
+  ##
+  ## The wrapper stores OpenAPI metadata and serialization configuration beside
+  ## the underlying Mummy router.
+  router*: Router ## Underlying Mummy router.
+  config*: ApiConfig ## Request/response codec and error-response configuration.
+  title*: string ## OpenAPI document title.
+  version*: string ## OpenAPI document version.
   paths: JsonNode
   components: JsonNode
 
@@ -27,10 +31,14 @@ template tapi*(
   tags: static openArray[string] = [],
   responseStatus: static int = 200,
 ) {.pragma.}
+  ## Pragma for annotating procs that can be registered with `api.add`.
+  ##
+  ## Example: `proc read(id: int): Item {.tapi(get, "/items/@id").} = ...`
 
 proc initApiRouter*(
     title = "API", version = "0.1.0", config = defaultApiConfig()
 ): ApiRouter =
+  ## Creates an `ApiRouter` with empty OpenAPI metadata.
   ApiRouter(
     config: config,
     title: title,
@@ -42,6 +50,7 @@ proc initApiRouter*(
 proc apiResponse*[T](
     body: sink T, statusCode = 200, headers: sink HttpHeaders
 ): ApiResponse[T] =
+  ## Builds a typed API response from a Mummy `HttpHeaders` collection.
   var apiHeaders: ApiHeaders
   for header in headers:
     apiHeaders.add((header[0], header[1]))
@@ -135,6 +144,9 @@ proc requestParamForField(request: Request, name: string): Option[string] =
 proc parseRequestParamValue*[T](
     request: Request, name: string, target: typedesc[T]
 ): T =
+  ## Parses one path or query parameter from a Mummy request.
+  ##
+  ## Missing required values and conversion failures are raised as `ApiError`.
   let raw = request.requestParamForField(name)
   if raw.isSome():
     parseApiParam(raw.get(), name, T)
@@ -142,9 +154,11 @@ proc parseRequestParamValue*[T](
     missingApiParam(name, T)
 
 proc parseRequestParamValue*[T](request: Request, name: string): T =
+  ## Parses one path or query parameter with the target type inferred.
   parseRequestParamValue(request, name, T)
 
 proc parseRequestParams*[T](request: Request, target: typedesc[T]): T =
+  ## Parses all fields of an object or tuple from path/query parameters.
   when T is EmptyInput or T is EmptyParams or T is EmptyBody:
     discard
   elif T is object or T is tuple:
@@ -156,6 +170,7 @@ proc parseRequestParams*[T](request: Request, target: typedesc[T]): T =
 proc decodeRequestBody*[T](
     request: Request, config: ApiConfig, target: typedesc[T]
 ): T =
+  ## Decodes the request body according to `Content-Type` and `config`.
   when T is EmptyInput or T is EmptyBody:
     discard
   else:
@@ -172,6 +187,7 @@ proc decodeRequestBody*[T](
 proc decodeInput*[T](
     request: Request, config: ApiConfig, source: ApiDecodeSource, target: typedesc[T]
 ): T =
+  ## Decodes route input from parameters, body, or no source.
   case source
   of adsNone:
     when T is EmptyInput:
@@ -189,6 +205,7 @@ proc decodeInput*[Params, Body](
     source: ApiDecodeSource,
     target: typedesc[ApiRequest[Params, Body]],
 ): ApiRequest[Params, Body] =
+  ## Decodes combined path/query parameters and request body input.
   result.params = parseRequestParams(request, Params)
   result.body = decodeRequestBody(request, config, Body)
 
@@ -200,18 +217,22 @@ proc addEndpoint*[In, Out](
     input: typedesc[In],
     output: typedesc[Out],
 ) =
+  ## Adds endpoint metadata to the router's OpenAPI document.
   api.components.addOpenApiSecuritySchemes(meta.security)
   swagger.addEndpoint(api.paths, httpMethod, path, source, meta, In, Out)
 
 proc newParameterSchemas*(): JsonNode =
+  ## Creates an OpenAPI parameter schema array.
   newJArray()
 
 proc addParameterSchema*[T](
     parameters: JsonNode, path, name: string, target: typedesc[T]
 ) =
+  ## Adds one OpenAPI parameter schema to `parameters`.
   parameters.add swagger.parameterSchema(path, name, T)
 
 proc addParameterSchema*[T](parameters: JsonNode, path, name: string) =
+  ## Adds one OpenAPI parameter schema with the target type inferred.
   addParameterSchema(parameters, path, name, T)
 
 proc addEndpointWithParams*[Out](
@@ -221,23 +242,28 @@ proc addEndpointWithParams*[Out](
     parameters: JsonNode,
     output: typedesc[Out],
 ) =
+  ## Adds endpoint metadata when parameter schemas were built explicitly.
   api.components.addOpenApiSecuritySchemes(meta.security)
   swagger.addEndpointWithParams(api.paths, httpMethod, path, meta, parameters, Out)
 
 proc addEndpointWithParams*[Out](
     api: ApiRouter, httpMethod, path: string, meta: EndpointMeta, parameters: JsonNode
 ) =
+  ## Adds endpoint metadata with inferred output type.
   addEndpointWithParams(api, httpMethod, path, meta, parameters, Out)
 
 proc addRequestHandler*(
     api: ApiRouter, httpMethod, path: string, handler: RequestHandler
 ) =
+  ## Registers a raw Mummy request handler on the wrapped router.
   api.router.addRoute(httpMethod, path, handler)
 
 proc registerOAuth2*(api: ApiRouter, config: OAuth2Config, tokenPath = "/oauth/token") =
+  ## Mounts the standard OAuth2 token endpoint on this API router.
   api.router.post(tokenPath, oauth2TokenHandler(config))
 
 proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =
+  ## Converts an exception to a negotiated TAPIS error response.
   let statusCode = apiErrorStatus(e)
   let body = apiErrorBody(e, config)
   let format =
@@ -250,6 +276,7 @@ proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =
 proc toApiHandler*[Out](
     handler: proc(): Out {.gcsafe.}, config: ApiConfig, responseStatus: int
 ): RequestHandler =
+  ## Converts a no-argument typed handler into a Mummy request handler.
   return proc(request: Request) {.gcsafe.} =
     try:
       request.respondRouteValue(handler(), config, responseStatus)
@@ -261,6 +288,7 @@ proc toApiHandler*[Out](
     config: ApiConfig,
     responseStatus: int,
 ): RequestHandler =
+  ## Converts a request-aware typed handler into a Mummy request handler.
   return proc(request: Request) {.gcsafe.} =
     try:
       request.respondRouteValue(handler(request), config, responseStatus)
@@ -273,6 +301,7 @@ proc toApiHandler*[In, Out](
     source: ApiDecodeSource,
     responseStatus: int,
 ): RequestHandler =
+  ## Converts a typed-input handler into a Mummy request handler.
   return proc(request: Request) {.gcsafe.} =
     try:
       let input = decodeInput(request, config, source, In)
@@ -286,6 +315,7 @@ proc toApiHandler*[In, Out](
     source: ApiDecodeSource,
     responseStatus: int,
 ): RequestHandler =
+  ## Converts a request-aware typed-input handler into a Mummy request handler.
   return proc(request: Request) {.gcsafe.} =
     try:
       let input = decodeInput(request, config, source, In)
@@ -300,6 +330,7 @@ proc route*[Out](
     source: ApiDecodeSource = adsNone,
     meta: EndpointMeta = endpointMeta(),
 ) =
+  ## Registers a typed route with no decoded input.
   api.addEndpoint(httpMethod, path, source, meta, EmptyInput, Out)
   api.router.addRoute(
     httpMethod,
@@ -316,6 +347,7 @@ proc route*[Out](
     source: ApiDecodeSource = adsNone,
     meta: EndpointMeta = endpointMeta(),
 ) =
+  ## Registers a request-aware typed route with no decoded input.
   api.addEndpoint(httpMethod, path, source, meta, EmptyInput, Out)
   api.router.addRoute(
     httpMethod,
@@ -332,6 +364,7 @@ proc route*[In, Out](
     source: ApiDecodeSource,
     meta: EndpointMeta = endpointMeta(),
 ) =
+  ## Registers a typed route with decoded parameters or body input.
   api.addEndpoint(httpMethod, path, source, meta, In, Out)
   api.router.addRoute(
     httpMethod,
@@ -348,6 +381,7 @@ proc route*[In, Out](
     source: ApiDecodeSource,
     meta: EndpointMeta = endpointMeta(),
 ) =
+  ## Registers a request-aware typed route with decoded input.
   api.addEndpoint(httpMethod, path, source, meta, In, Out)
   api.router.addRoute(
     httpMethod,
@@ -557,6 +591,9 @@ macro routeHandler*(
     source: typed,
     meta: typed,
 ): untyped =
+  ## Registers a typed route by analyzing the handler signature at compile time.
+  ##
+  ## Most applications use `api.get`, `api.post`, or `api.add` instead.
   buildRouteHandler(api, httpMethod, path, handler, source, meta)
 
 template defineApiMethod(name, httpMethod, source: untyped) =
@@ -571,6 +608,7 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       responseStatus: int = 200,
       security: ApiSecurity = noSecurity(),
   ): untyped =
+    ## Registers a typed TAPIS route for this HTTP method.
     routeHandler(
       api,
       httpMethod,
@@ -647,6 +685,10 @@ proc staticTagsArg(node: NimNode): NimNode =
     result = node.copyNimTree()
 
 macro add*(api: typed, handler: typed, security: typed = noSecurity()): untyped =
+  ## Registers a proc annotated with the `tapi` pragma.
+  ##
+  ## Route metadata is read from the pragma, while `security` may be supplied at
+  ## the registration site or injected by `withSecurity`.
   let pragma = findTapiPragma(handler.getImpl())
   if pragma.isNil:
     error("api.add expects a handler annotated with {.tapi(...).}", handler)
@@ -697,6 +739,7 @@ template options*(
     responseStatus = 200,
     security: ApiSecurity = noSecurity(),
 ): untyped =
+  ## Registers an `OPTIONS` TAPIS route.
   route(
     api,
     "OPTIONS",
@@ -707,9 +750,11 @@ template options*(
   )
 
 proc openApiJson*(api: ApiRouter): JsonNode =
+  ## Builds the OpenAPI document for all registered TAPIS routes.
   swagger.openApiJson(api.title, api.version, api.paths, api.components)
 
 proc openApiHandler*(api: ApiRouter): RequestHandler =
+  ## Returns a Mummy handler that serves this router's OpenAPI JSON document.
   return proc(request: Request) {.gcsafe.} =
     var headers: HttpHeaders
     headers["Content-Type"] = jsonContentType
@@ -721,10 +766,13 @@ proc openApiHandler*(api: ApiRouter): RequestHandler =
       request.respond(200, headers, body)
 
 proc mountOpenApi*(api: ApiRouter, path = "/swagger.json") =
+  ## Mounts the OpenAPI JSON handler at `path`.
   api.router.get(path, api.openApiHandler())
 
 proc toHandler*(api: ApiRouter): RequestHandler =
+  ## Converts the wrapped Mummy router to a Mummy request handler.
   api.router.toHandler()
 
 converter toMummyRouter*(api: ApiRouter): Router =
+  ## Allows an `ApiRouter` to be passed where a Mummy `Router` is expected.
   api.router

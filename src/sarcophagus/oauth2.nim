@@ -8,6 +8,7 @@ import ./core/oauth2
 
 type OAuth2ProtectedRequestHandler* =
   proc(request: Request, claims: BearerTokenClaims) {.gcsafe.}
+  ## Mummy handler shape for OAuth2-protected endpoints that need JWT claims.
 
 const routeRegistrationNames =
   ["addRoute", "get", "head", "post", "put", "delete", "options", "patch"]
@@ -25,6 +26,7 @@ proc respondJson(
     request.respond(statusCode, responseHeaders, body)
 
 proc defaultOAuth2ErrorResponder*(request: Request, failure: OAuth2Failure) {.gcsafe.} =
+  ## Writes the default JSON response for OAuth2 resource-server failures.
   var headers: HttpHeaders
   if failure.wwwAuthenticate.len > 0:
     headers["WWW-Authenticate"] = failure.wwwAuthenticate
@@ -40,6 +42,9 @@ proc defaultOAuth2ErrorResponder*(request: Request, failure: OAuth2Failure) {.gc
 proc defaultOAuth2TokenErrorResponder*(
     request: Request, failure: OAuth2Failure
 ) {.gcsafe.} =
+  ## Writes the default JSON response for OAuth2 token endpoint failures.
+  ##
+  ## The response includes `Cache-Control: no-store` and `Pragma: no-cache`.
   var headers: HttpHeaders
   headers["Cache-Control"] = "no-store"
   headers["Pragma"] = "no-cache"
@@ -59,6 +64,11 @@ proc oauth2TokenHandler*(
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2TokenErrorResponder,
 ): RequestHandler =
+  ## Returns a Mummy handler for the OAuth2 client-credentials token endpoint.
+  ##
+  ## The handler delegates protocol validation to
+  ## `core/oauth2.issueClientCredentialsToken` and supports HTTP Basic,
+  ## form-body, and JSON-body client authentication.
   return proc(request: Request) {.gcsafe.} =
     if request.httpMethod != "POST":
       var headers: HttpHeaders
@@ -87,16 +97,19 @@ proc oauth2TokenHandler*(
 proc registerOAuth2*(
     router: var Router, config: OAuth2Config, tokenPath = "/oauth/token"
 ) =
+  ## Mounts `oauth2TokenHandler(config)` on `router.post(tokenPath)`.
   router.post(tokenPath, oauth2TokenHandler(config))
 
 proc validateOAuth2BearerRequest*(
     request: Request, config: OAuth2Config, requiredScopes: openArray[string] = []
 ): OAuth2ResourceResult {.gcsafe.} =
+  ## Validates the request's `Authorization: Bearer ...` token and scopes.
   validateOAuth2BearerToken(config, request.headers["Authorization"], requiredScopes)
 
 proc validateOAuth2BearerRequest*(
     request: Request, config: OAuth2Config, requiredClaims: openArray[OAuth2ScopeClaim]
 ): OAuth2ResourceResult {.gcsafe.} =
+  ## Validates bearer auth using structured scope-claim pairs.
   validateOAuth2BearerRequest(request, config, scopeClaimsToScopes(requiredClaims))
 
 proc requireOAuth2BearerAuth*(
@@ -106,6 +119,9 @@ proc requireOAuth2BearerAuth*(
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2ErrorResponder,
 ): bool {.gcsafe.} =
+  ## Validates OAuth2 bearer auth and writes an error response on failure.
+  ##
+  ## Returns true when the request may continue to the protected handler.
   let validation = validateOAuth2BearerRequest(request, config, requiredScopes)
   if validation.ok:
     return true
@@ -120,6 +136,7 @@ proc requireOAuth2BearerAuth*(
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2ErrorResponder,
 ): bool {.gcsafe.} =
+  ## Validates OAuth2 bearer auth using structured scope-claim pairs.
   requireOAuth2BearerAuth(request, config, scopeClaimsToScopes(requiredClaims), onError)
 
 proc oauth2*(
@@ -129,6 +146,7 @@ proc oauth2*(
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2ErrorResponder,
 ): RequestHandler =
+  ## Wraps a plain Mummy handler with OAuth2 bearer-token authorization.
   let scopes = @requiredScopes
   return proc(request: Request) {.gcsafe.} =
     if not requireOAuth2BearerAuth(request, config, scopes, onError):
@@ -142,6 +160,7 @@ proc oauth2*(
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2ErrorResponder,
 ): RequestHandler =
+  ## Wraps a Mummy handler and passes validated bearer-token claims to it.
   let scopes = @requiredScopes
   return proc(request: Request) {.gcsafe.} =
     let validation = validateOAuth2BearerRequest(request, config, scopes)
@@ -157,6 +176,7 @@ proc oauth2*(
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2ErrorResponder,
 ): RequestHandler =
+  ## Wraps a plain Mummy handler using structured scope-claim pairs.
   oauth2(wrapped, config, scopeClaimsToScopes(requiredClaims), onError)
 
 proc oauth2*(
@@ -166,6 +186,7 @@ proc oauth2*(
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
       defaultOAuth2ErrorResponder,
 ): RequestHandler =
+  ## Wraps a claims-aware Mummy handler using structured scope-claim pairs.
   oauth2(wrapped, config, scopeClaimsToScopes(requiredClaims), onError)
 
 proc isRouteRegistrationCall(node: NimNode): bool =
@@ -204,4 +225,8 @@ proc rewriteWithOAuth2(
       result[idx] = rewriteWithOAuth2(result[idx], config, requiredClaims)
 
 macro withOAuth2*(config: typed, requiredClaims: typed, body: untyped): untyped =
+  ## Applies `oauth2` to Mummy route registrations inside `body`.
+  ##
+  ## The macro rewrites route calls such as `router.get(...)` so their handler
+  ## argument is protected by OAuth2 bearer-token validation.
   rewriteWithOAuth2(body, config, requiredClaims)
