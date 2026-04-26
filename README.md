@@ -4,73 +4,49 @@ Sarcophagus is a FastAPI inspired higher-level API layer for [Mummy](https://git
 Its TAPIS modules turn typed Nim procs into HTTP handlers, JSON/CBOR codecs,
 OpenAPI route metadata, and OAuth2-protected endpoints.
 
-## First Example: Secure TAPIS Goto Service
+## First Example
 
-The most complete example is `examples/tapis_secure`. It builds a small "goto"
-service with:
+Save this as `server.nim`:
 
-- flat FastAPI-style handler parameters
-- `tapi` proc pragmas for route metadata
-- scoped OAuth2 security around groups of routes
-- generated `/swagger.json`
-- typed JSON error responses
+```nim
+import std/options
+
+import mummy
+import sarcophagus/tapis
+
+type Item = object
+  id*: int
+  name*: string
+  verbose*: bool
+
+proc readItem(id: int, verbose: Option[bool]): Item {.
+  tapi(get, "/items/@id", summary = "Read an item", tags = ["items"])
+.} =
+  Item(id: id, name: "item-" & $id, verbose: verbose.get(false))
+
+proc createItem(item: Item): ApiResponse[Item] {.
+  tapi(post, "/items", summary = "Create an item", responseStatus = 201)
+.} =
+  apiResponse(item, statusCode = 201)
+
+let api = initApiRouter("Example API", "1.0.0")
+api.add(readItem)
+api.add(createItem)
+api.mountOpenApi()
+
+echo "Listening on http://127.0.0.1:8080"
+newServer(api.router).serve(Port(8080), address = "127.0.0.1")
+```
 
 Run it with:
 
 ```sh
 atlas install
-nim c -r examples/tapis_secure/runner.nim
+nim c -r --path:src server.nim
 ```
 
-The server is defined by annotating ordinary Nim procs:
-
-```nim
-import std/[json, options]
-import mummy
-import sarcophagus/[core/jwt_bearer_tokens, core/oauth2, tapis]
-
-type
-  Goto = object
-    slug*: string
-    url*: string
-    title*: string
-    visits*: int
-
-proc resolveGoto(slug: string, preview: Option[bool]): Goto {.
-  tapi(get, "/go/@slug", summary = "Resolve a goto slug", tags = ["goto"])
-.} =
-  # `slug` comes from the path. `preview` comes from the query string.
-  Goto(slug: slug, url: "https://example.test", title: "Example", visits: 1)
-```
-
-Registration uses `api.add` and can be scoped:
-
-```nim
-let authConfig = oauthConfig()
-let readSecurity = oauth2(authConfig, ["goto:read"])
-let writeSecurity = oauth2(authConfig, ["goto:write"])
-
-let api = initApiRouter("Sarcophagus TAPIS Secure Goto Example", "1.0.0")
-
-api.registerOAuth2(authConfig)
-api.add(resolveGoto)
-withSecurity(api, readSecurity):
-  api.add(listGotos)
-  api.add(inspectGoto)
-  withSecurity(api, writeSecurity):
-    api.add(saveGoto)
-    api.add(deleteGoto)
-
-api.mountOpenApi()
-newServer(api.router).serve(Port(9083), address = "127.0.0.1")
-```
-
-`registerOAuth2` mounts the standard client-credentials token endpoint using the
-OAuth2 helper from `sarcophagus/oauth2`:
-
-```nim
-api.registerOAuth2(authConfig)
-```
+Then try `GET /items/42?verbose=true`, `POST /items`, or inspect
+`/swagger.json`.
 
 ## `sarcophagus/tapis`
 
