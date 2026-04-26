@@ -1,14 +1,11 @@
 # Sarcophagus
 
-Sarcophagus is a FastAPI inspired higher-level API layer for [Mummy](https://github.com/guzba/mummy).
-Its TAPIS modules turn typed Nim procs into HTTP handlers, JSON/CBOR codecs,
-OpenAPI route metadata, and OAuth2-protected endpoints.
+Sarcophagus is a FastAPI inspired higher-level API layer for [Mummy](https://github.com/guzba/mummy). Its TAPIS modules turn typed Nim procs into HTTP handlers, JSON/CBOR codecs, OpenAPI route metadata, and OAuth2-protected endpoints.
 
 ## Basic Example
 
 ```nim
 import std/options
-
 import mummy
 import sarcophagus/tapis
 
