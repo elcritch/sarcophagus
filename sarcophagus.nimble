@@ -6,7 +6,8 @@ srcDir        = "src"
 
 requires "nim >= 2.0.0"
 requires "mummy"
-requires "https://github.com/elcritch/nim-jwt#fix-upstream"
+requires "jwt >= 0.3"
+requires "bearssl >= 0.2.8"
 
 feature "cbor":
   requires "cborious"
