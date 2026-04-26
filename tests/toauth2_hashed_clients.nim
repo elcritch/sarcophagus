@@ -123,6 +123,19 @@ suite "hashed oauth2 clients":
     check badSecret.failure.statusCode == 401
     check store.auditEvents[^1].reason == "invalid_client"
 
+    let unknown = issueHashedClientCredentialsToken(
+      config,
+      store.loadCallback(),
+      authorizationHeader = "",
+      contentType = "application/json",
+      requestBody = """{"client_id":"unknown-app","client_secret":"wrong"}""",
+      onAudit = store.auditCallback(),
+    )
+    check not unknown.ok
+    check unknown.failure.statusCode == 401
+    check unknown.failure.error == "invalid_client"
+    check store.auditEvents[^1].reason == "unknown_client"
+
   test "mummy token handler issues tokens from hashed client store":
     randomize()
     let config = testConfig()

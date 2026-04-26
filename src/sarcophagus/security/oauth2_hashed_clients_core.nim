@@ -342,6 +342,19 @@ proc resolveScopes(
     return client.defaultScopes
   client.scopes
 
+proc dummySecretHash(policy: SecretHashPolicy): string =
+  let prefix = if policy.prefix.len > 0: policy.prefix else: SecretHashPrefix
+  let saltBytes =
+    if policy.saltBytes > 0 and policy.saltBytes <= SecretHashMaxSaltBytes:
+      policy.saltBytes
+    else:
+      SecretHashSaltBytes
+  prefix & "$" & $policy.iterations & "$" & "0".repeat(saltBytes * 2) & "$" &
+    "0".repeat(SecretHashDigestBytes * 2)
+
+proc verifyDummySecret(clientSecret: string, policy: SecretHashPolicy) =
+  discard verifySecret(clientSecret, dummySecretHash(policy), policy)
+
 proc issueHashedClientCredentialsToken*(
     config: OAuth2Config,
     loadClient: HashedOAuth2ClientLoader,
@@ -438,6 +451,7 @@ proc issueHashedClientCredentialsToken*(
       none(HashedOAuth2Client)
 
   if loadedClient.isNone():
+    verifyDummySecret(clientSecret, policy)
     auditAttempt(onAudit, effectiveClientId, false, "unknown_client")
     return tokenFailure(
       401,
@@ -448,6 +462,7 @@ proc issueHashedClientCredentialsToken*(
 
   let client = loadedClient.get()
   if not client.enabled:
+    verifyDummySecret(clientSecret, policy)
     auditAttempt(onAudit, effectiveClientId, false, "disabled_client")
     return tokenFailure(
       401,

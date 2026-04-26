@@ -75,6 +75,7 @@ suite "secret hashing":
     let policy = testPolicy()
     let digest = "a".repeat(SecretHashDigestBytes * 2)
     let salt = "b".repeat(policy.saltBytes * 2)
+    let oversizedSalt = "b".repeat((SecretHashMaxSaltBytes + 1) * 2)
 
     check not verifySecret("secret", "", policy)
     check not verifySecret("secret", "sha256$1000$" & salt & "$" & digest, policy)
@@ -105,10 +106,22 @@ suite "secret hashing":
       SecretHashPrefix & "$" & $policy.iterations & "$" & salt & "$not-hex",
       policy,
     )
+    check not verifySecret(
+      "secret",
+      SecretHashPrefix & "$" & $policy.iterations & "$" & oversizedSalt & "$" & digest,
+      policy,
+    )
     check needsSecretRehash("", policy)
 
   test "requires non-empty secrets and valid policies":
     let policy = testPolicy()
+    let invalidPolicy = SecretHashPolicy(
+      prefix: SecretHashPrefix,
+      iterations: 0,
+      minIterations: 0,
+      maxIterations: 1,
+      saltBytes: 16,
+    )
 
     expect ValueError:
       discard hashSecret("", policy)
@@ -116,8 +129,32 @@ suite "secret hashing":
       discard hashSecret("   ", policy)
     expect ValueError:
       discard hashSecret("secret", SecretHashPolicy(prefix: "", iterations: 1))
+    expect ValueError:
+      discard hashSecret(
+        "secret",
+        SecretHashPolicy(
+          prefix: SecretHashPrefix,
+          iterations: 1,
+          minIterations: 1,
+          maxIterations: 1,
+          saltBytes: SecretHashMaxSaltBytes + 1,
+        ),
+      )
+    expect ValueError:
+      discard pbkdf2Sha256("secret", "salt", 0, invalidPolicy)
     check not verifySecret("", hashSecret("not-empty", policy), policy)
     check not verifySecret("   ", hashSecret("not-empty", policy), policy)
+    check not verifySecret(
+      "secret",
+      SecretHashPrefix & "$0$" & "a".repeat(policy.saltBytes * 2) & "$" &
+        "b".repeat(SecretHashDigestBytes * 2),
+      invalidPolicy,
+    )
+    check not parseSecretHash(
+      SecretHashPrefix & "$0$" & "a".repeat(policy.saltBytes * 2) & "$" &
+        "b".repeat(SecretHashDigestBytes * 2),
+      invalidPolicy,
+    ).ok
 
   test "generates random secrets":
     let firstSecret = randomSecret()

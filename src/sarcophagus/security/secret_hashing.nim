@@ -14,6 +14,8 @@ const
   SecretHashMinSaltBytes* = 16
     ## Minimum accepted salt size for compatibility with older hashes.
   SecretHashSaltBytes* = 32 ## Default salt size for newly generated hashes.
+  SecretHashMaxSaltBytes* = 64
+    ## Maximum accepted salt size when verifying existing hashes.
   SecretHashDigestBytes* = 32 ## PBKDF2-SHA256 output size.
 
 type
@@ -59,10 +61,19 @@ proc requireValidPolicy(policy: SecretHashPolicy) =
     raise newException(ValueError, "secret hash iterations are out of range")
   if policy.saltBytes <= 0:
     raise newException(ValueError, "secret hash salt bytes must be positive")
+  if policy.saltBytes > SecretHashMaxSaltBytes:
+    raise newException(ValueError, "secret hash salt bytes are out of range")
 
 proc requireValidIterations(iterations: int, policy: SecretHashPolicy) =
   if iterations < policy.minIterations or iterations > policy.maxIterations:
     raise newException(ValueError, "secret hash iterations are out of range")
+
+proc policyIsValid(policy: SecretHashPolicy): bool =
+  try:
+    requireValidPolicy(policy)
+    true
+  except ValueError:
+    false
 
 proc constantTimeEquals*(lhs, rhs: string): bool =
   ## Compares strings without early exit.
@@ -125,6 +136,7 @@ proc pbkdf2Sha256*(
   ## This is exported for callers that need the primitive directly. Most code
   ## should prefer `hashSecret` and `verifySecret`, which handle salts, encoded
   ## hash format, and constant-time digest comparison.
+  requireValidPolicy(policy)
   requireValidIterations(iterations, policy)
 
   var blockInput = newSeq[byte](salt.len + 4)
@@ -153,6 +165,9 @@ proc parseSecretHash*(
   ##
   ## The accepted format is `prefix$iterations$saltHex$digestHex`. Invalid input
   ## returns `SecretHashParts(ok: false)` instead of raising.
+  if not policyIsValid(policy):
+    return
+
   let parts = secretHash.split('$')
   if parts.len != 4 or parts[0] != policy.prefix:
     return
@@ -166,8 +181,9 @@ proc parseSecretHash*(
   if iterations < policy.minIterations or iterations > policy.maxIterations:
     return
   let minSaltHexLength = min(policy.saltBytes, SecretHashMinSaltBytes) * 2
+  let maxSaltHexLength = max(policy.saltBytes, SecretHashMaxSaltBytes) * 2
   if parts[2].len < minSaltHexLength or parts[2].len mod 2 != 0 or
-      not parts[2].isLowerHex():
+      parts[2].len > maxSaltHexLength or not parts[2].isLowerHex():
     return
   if parts[3].len != SecretHashDigestBytes * 2 or not parts[3].isLowerHex():
     return

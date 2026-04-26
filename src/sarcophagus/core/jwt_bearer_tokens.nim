@@ -357,7 +357,7 @@ proc validateBearerToken*(
     let exp = jsonIntClaim(payload, "exp")
     if exp.isNone():
       return failure(401, "invalid_token", "Token is missing exp")
-    if now > exp.get():
+    if now >= exp.get():
       return failure(401, "invalid_token", "Token is expired")
 
     let iat =

@@ -53,6 +53,29 @@ suite "bearer token core":
     check validation.failure.statusCode == 403
     check validation.failure.code == "insufficient_scope"
 
+  test "validation rejects tokens at their exp timestamp":
+    let config = initBearerTokenConfig(
+      issuer = "sam-sync-server",
+      audience = "sam-sync-api",
+      keys = [SigningKey(kid: "v1", secret: "secret-a")],
+    )
+    let token = mintBearerToken(
+      config,
+      initBearerTokenSpec(
+        subject = "client-1",
+        scopes = ["sync:read"],
+        ttlSeconds = 600,
+        issuedAt = 1_700_000_000,
+      ),
+    )
+
+    check validateBearerToken(config, token, now = 1_700_000_599).ok
+    let validation = validateBearerToken(config, token, now = 1_700_000_600)
+    check not validation.ok
+    check validation.failure.statusCode == 401
+    check validation.failure.code == "invalid_token"
+    check validation.failure.message == "Token is expired"
+
   test "authorization header parsing is case-insensitive and trims whitespace":
     let token = bearerTokenFromAuthorizationHeader("  bearer   abc.def.ghi  ")
     check token == "abc.def.ghi"
