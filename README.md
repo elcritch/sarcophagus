@@ -62,9 +62,9 @@ Core pieces:
 Flat handler style keeps simple APIs concise:
 
 ```nim
-proc readItem(id: int, verbose: Option[bool]): ItemOut {.
-  tapi(get, "/items/@id", summary = "Read item")
-.} =
+proc readItem(
+    id: int, verbose: Option[bool]
+): ItemOut {.tapi(get, "/items/@id", summary = "Read item").} =
   ItemOut(id: id, verbose: verbose.get(false))
 
 api.add(readItem)
@@ -82,9 +82,9 @@ type ListItemsParams = object
   limit*: Option[int]
   tag*: Option[string]
 
-proc listItems(params: Params[ListItemsParams]): ItemList {.
-  tapi(get, "/items", summary = "List items")
-.} =
+proc listItems(
+    params: Params[ListItemsParams]
+): ItemList {.tapi(get, "/items", summary = "List items").} =
   discard
 ```
 
@@ -96,9 +96,9 @@ type CreateItemBody = object
   name*: string
   count*: int
 
-proc createItem(body: CreateItemBody): ApiResponse[ItemOut] {.
-  tapi(post, "/items", summary = "Create item", responseStatus = 201)
-.} =
+proc createItem(
+    body: CreateItemBody
+): ApiResponse[ItemOut] {.tapi(post, "/items", summary = "Create item", responseStatus = 201).} =
   apiResponse(ItemOut(name: body.name, count: body.count), statusCode = 201)
 ```
 
@@ -109,9 +109,9 @@ a request body:
 type ItemPath = object
   id*: int
 
-proc updateItem(input: ApiRequest[ItemPath, CreateItemBody]): ItemOut {.
-  tapi(put, "/items/@id", summary = "Update item")
-.} =
+proc updateItem(
+    input: ApiRequest[ItemPath, CreateItemBody]
+): ItemOut {.tapi(put, "/items/@id", summary = "Update item").} =
   ItemOut(id: input.params.id, name: input.body.name, count: input.body.count)
 ```
 
@@ -147,12 +147,12 @@ type UserInfo = object
   message*: string
 
 proc health(): HealthResponse {.
-  gcsafe, tapi(get, "/health", summary = "Health check", tags = ["system"])
+  tapi(get, "/health", summary = "Health check", tags = ["system"])
 .} =
   HealthResponse(status: "ok")
 
 proc currentUser(): UserInfo {.
-  gcsafe, tapi(get, "/me", summary = "Current authenticated user", tags = ["users"])
+  tapi(get, "/me", summary = "Current authenticated user", tags = ["users"])
 .} =
   UserInfo(status: "ok", message: "authenticated")
 
