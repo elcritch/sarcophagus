@@ -307,9 +307,9 @@ let validation = validateOAuth2BearerToken(
 For TAPIS routes, prefer `security = oauth2(...)` or `withSecurity(...)` so
 OpenAPI metadata stays in sync with runtime enforcement.
 
-## `sarcophagus/secret_hashing`
+## `sarcophagus/security/secret_hashing`
 
-`sarcophagus/secret_hashing` uses BearSSL to provide generic PBKDF2-HMAC-SHA256 hashing for passwords, client secrets, API keys, and other user-provided secrets.
+`sarcophagus/security/secret_hashing` uses BearSSL to provide generic PBKDF2-HMAC-SHA256 hashing for passwords, client secrets, API keys, and other user-provided secrets.
 
 Hashes are stored as:
 
@@ -320,7 +320,7 @@ pbkdf2-sha256$iterations$saltHex$digestHex
 Typical use:
 
 ```nim
-import sarcophagus/secret_hashing
+import sarcophagus/security/secret_hashing
 
 let storedHash = hashSecret("client-secret")
 
@@ -352,6 +352,44 @@ let policy = SecretHashPolicy(
 let storedHash = hashSecret("client-secret", policy)
 doAssert verifySecret("client-secret", storedHash, policy)
 ```
+
+## `sarcophagus/security/oauth2_hashed_clients`
+
+`sarcophagus/security/oauth2_hashed_clients` adds reusable OAuth2 client
+credential plumbing for applications that store hashed client secrets instead of
+plaintext secrets. Storage is callback-based, so an application can back it with
+SQLite, Postgres, flat files, or another store.
+
+For setup tools, seed a client and persist the resulting `HashedOAuth2Client`:
+
+```nim
+import sarcophagus/security/oauth2_hashed_clients
+
+let credentials = seedHashedOAuth2Client(
+  proc(client: HashedOAuth2Client) {.gcsafe.} =
+    persistClient(client), # application-owned storage
+  clientId = "reader-app",
+  scopes = ["items:read", "items:write"],
+  defaultScopes = ["items:read"],
+)
+
+echo credentials.clientId
+echo credentials.clientSecret # show once to the operator
+```
+
+At runtime, mount a token endpoint using a loader callback:
+
+```nim
+router.registerHashedOAuth2(
+  oauthConfig,
+  proc(clientId: string): Option[HashedOAuth2Client] {.gcsafe.} =
+    loadClientFromDb(clientId),
+)
+```
+
+The token endpoint verifies `client_secret` with `verifySecret`, rejects disabled
+clients, mints the same Sarcophagus bearer tokens as `sarcophagus/oauth2`, and
+can emit best-effort audit events through `onAudit`.
 
 ## `sarcophagus/core/jwt_bearer_tokens`
 

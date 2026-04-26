@@ -1,6 +1,6 @@
 import std/[strutils, unittest]
 
-import sarcophagus/secret_hashing
+import sarcophagus/security/secret_hashing
 
 const TestIterations = 1_000
 
