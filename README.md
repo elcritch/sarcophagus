@@ -138,8 +138,7 @@ Use `security = ...` for one route:
 api.add(readItem, security = oauth2(config, ["items:read"]))
 ```
 
-If a route only needs a valid bearer token and does not require specific scopes,
-omit the scope list:
+If a route only needs a valid bearer token and does not require specific scopes, omit the scope list:
 
 ```nim
 type UserInfo = object
