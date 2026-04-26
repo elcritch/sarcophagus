@@ -26,9 +26,7 @@ The server is defined by annotating ordinary Nim procs:
 
 ```nim
 import std/[json, options]
-
 import mummy
-
 import sarcophagus/[core/jwt_bearer_tokens, core/oauth2, tapis]
 
 type
@@ -39,7 +37,7 @@ type
     visits*: int
 
 proc resolveGoto(slug: string, preview: Option[bool]): Goto {.
-  gcsafe, tapi(get, "/go/@slug", summary = "Resolve a goto slug", tags = ["goto"])
+  tapi(get, "/go/@slug", summary = "Resolve a goto slug", tags = ["goto"])
 .} =
   # `slug` comes from the path. `preview` comes from the query string.
   Goto(slug: slug, url: "https://example.test", title: "Example", visits: 1)
@@ -93,7 +91,7 @@ Flat handler style keeps simple APIs concise:
 
 ```nim
 proc readItem(id: int, verbose: Option[bool]): ItemOut {.
-  gcsafe, tapi(get, "/items/@id", summary = "Read item")
+  tapi(get, "/items/@id", summary = "Read item")
 .} =
   ItemOut(id: id, verbose: verbose.get(false))
 
@@ -113,7 +111,7 @@ type ListItemsParams = object
   tag*: Option[string]
 
 proc listItems(params: Params[ListItemsParams]): ItemList {.
-  gcsafe, tapi(get, "/items", summary = "List items")
+  tapi(get, "/items", summary = "List items")
 .} =
   discard
 ```
@@ -127,7 +125,7 @@ type CreateItemBody = object
   count*: int
 
 proc createItem(body: CreateItemBody): ApiResponse[ItemOut] {.
-  gcsafe, tapi(post, "/items", summary = "Create item", responseStatus = 201)
+  tapi(post, "/items", summary = "Create item", responseStatus = 201)
 .} =
   apiResponse(ItemOut(name: body.name, count: body.count), statusCode = 201)
 ```
@@ -140,7 +138,7 @@ type ItemPath = object
   id*: int
 
 proc updateItem(input: ApiRequest[ItemPath, CreateItemBody]): ItemOut {.
-  gcsafe, tapi(put, "/items/@id", summary = "Update item")
+  tapi(put, "/items/@id", summary = "Update item")
 .} =
   ItemOut(id: input.params.id, name: input.body.name, count: input.body.count)
 ```
