@@ -5,6 +5,8 @@ import bearssl/[hash, hmac]
 const
   SecretHashPrefix* = "pbkdf2-sha256"
     ## Default algorithm marker stored at the front of encoded secret hashes.
+  FastSecretHashPrefix* = "hmac-sha256"
+    ## Fast algorithm marker for high-entropy machine secret hashes.
   SecretHashIterations* = 600_000
     ## Default PBKDF2-SHA256 iteration count for newly generated hashes.
   SecretHashMinIterations* = 120_000
@@ -19,11 +21,16 @@ const
   SecretHashDigestBytes* = 32 ## PBKDF2-SHA256 output size.
 
 type
+  SecretHashAlgorithm* = enum
+    secretHashPbkdf2Sha256
+    secretHashHmacSha256
+
   SecretHashPolicy* = object
     ## Parameters for generating and validating encoded secret hashes.
     ##
     ## Use a custom policy to raise the iteration count over time or to accept
     ## legacy hash parameters during a migration.
+    algorithm*: SecretHashAlgorithm ## Algorithm used for newly generated hashes.
     prefix*: string ## Algorithm marker expected in encoded hashes.
     iterations*: int ## Iteration count used for newly generated hashes.
     minIterations*: int ## Lowest accepted iteration count when parsing an existing hash.
@@ -34,18 +41,29 @@ type
   SecretHashParts* = object ## Parsed components of an encoded secret hash.
     ok*: bool ## True when parsing and policy validation succeeded.
     prefix*: string ## Algorithm marker from the encoded hash.
+    algorithm*: SecretHashAlgorithm ## Algorithm selected by the encoded prefix.
     iterations*: int ## Iteration count from the encoded hash.
     salt*: string ## Lowercase hex-encoded salt.
-    digest*: string ## Lowercase hex-encoded PBKDF2 digest.
+    digest*: string ## Lowercase hex-encoded digest.
 
 proc defaultSecretHashPolicy*(): SecretHashPolicy =
   ## Returns the default PBKDF2-SHA256 policy used by `hashSecret`.
   SecretHashPolicy(
+    algorithm: secretHashPbkdf2Sha256,
     prefix: SecretHashPrefix,
     iterations: SecretHashIterations,
     minIterations: SecretHashMinIterations,
     maxIterations: SecretHashMaxIterations,
     saltBytes: SecretHashSaltBytes,
+  )
+
+proc fastSecretHashPolicy*(saltBytes = SecretHashSaltBytes): SecretHashPolicy =
+  ## Returns a fast HMAC-SHA256 policy for high-entropy machine secrets.
+  ##
+  ## This is appropriate for generated OAuth client secrets, API keys, and other
+  ## random bearer-style secrets. Keep PBKDF2 for human-chosen passwords.
+  SecretHashPolicy(
+    algorithm: secretHashHmacSha256, prefix: FastSecretHashPrefix, saltBytes: saltBytes
   )
 
 proc requireNonEmpty(value, fieldName: string) =
@@ -55,14 +73,20 @@ proc requireNonEmpty(value, fieldName: string) =
 proc requireValidPolicy(policy: SecretHashPolicy) =
   if policy.prefix.strip().len == 0:
     raise newException(ValueError, "secret hash prefix is required")
-  if policy.minIterations <= 0 or policy.maxIterations < policy.minIterations:
-    raise newException(ValueError, "secret hash iteration bounds are invalid")
-  if policy.iterations < policy.minIterations or policy.iterations > policy.maxIterations:
-    raise newException(ValueError, "secret hash iterations are out of range")
   if policy.saltBytes <= 0:
     raise newException(ValueError, "secret hash salt bytes must be positive")
   if policy.saltBytes > SecretHashMaxSaltBytes:
     raise newException(ValueError, "secret hash salt bytes are out of range")
+
+  case policy.algorithm
+  of secretHashPbkdf2Sha256:
+    if policy.minIterations <= 0 or policy.maxIterations < policy.minIterations:
+      raise newException(ValueError, "secret hash iteration bounds are invalid")
+    if policy.iterations < policy.minIterations or
+        policy.iterations > policy.maxIterations:
+      raise newException(ValueError, "secret hash iterations are out of range")
+  of secretHashHmacSha256:
+    discard
 
 proc requireValidIterations(iterations: int, policy: SecretHashPolicy) =
   if iterations < policy.minIterations or iterations > policy.maxIterations:
@@ -128,6 +152,15 @@ proc hmacSha256(
     hmacUpdate(context, cast[pointer](unsafeAddr data[0]), csize_t(data.len))
   discard hmacOut(context, addr result[0])
 
+proc stringBytes(value: string): seq[byte] =
+  result = newSeq[byte](value.len)
+  for idx, ch in value:
+    result[idx] = byte(ord(ch))
+
+proc fastHmacSha256*(secret, salt: string): string =
+  ## Computes a fast HMAC-SHA256 digest for a high-entropy machine secret.
+  hexEncode(hmacSha256(salt, stringBytes(secret)))
+
 proc pbkdf2Sha256*(
     secret, salt: string, iterations: int, policy = defaultSecretHashPolicy()
 ): array[SecretHashDigestBytes, byte] =
@@ -136,6 +169,8 @@ proc pbkdf2Sha256*(
   ## This is exported for callers that need the primitive directly. Most code
   ## should prefer `hashSecret` and `verifySecret`, which handle salts, encoded
   ## hash format, and constant-time digest comparison.
+  if policy.algorithm != secretHashPbkdf2Sha256:
+    raise newException(ValueError, "PBKDF2 requires a PBKDF2 secret hash policy")
   requireValidPolicy(policy)
   requireValidIterations(iterations, policy)
 
@@ -169,27 +204,60 @@ proc parseSecretHash*(
     return
 
   let parts = secretHash.split('$')
-  if parts.len != 4 or parts[0] != policy.prefix:
+  if parts.len notin {3, 4}:
     return
 
-  let iterations =
-    try:
-      parseInt(parts[1])
-    except ValueError:
+  let algorithm =
+    if parts[0] == SecretHashPrefix:
+      secretHashPbkdf2Sha256
+    elif parts[0] == FastSecretHashPrefix:
+      secretHashHmacSha256
+    elif parts[0] == policy.prefix:
+      policy.algorithm
+    else:
       return
 
-  if iterations < policy.minIterations or iterations > policy.maxIterations:
-    return
+  var iterations = 0
+  var saltIndex = 1
+  var digestIndex = 2
+  case algorithm
+  of secretHashPbkdf2Sha256:
+    if parts.len != 4:
+      return
+    let pbkdf2Policy =
+      if policy.algorithm == secretHashPbkdf2Sha256:
+        policy
+      else:
+        defaultSecretHashPolicy()
+    iterations =
+      try:
+        parseInt(parts[1])
+      except ValueError:
+        return
+    if iterations < pbkdf2Policy.minIterations or iterations > pbkdf2Policy.maxIterations:
+      return
+    saltIndex = 2
+    digestIndex = 3
+  of secretHashHmacSha256:
+    if parts.len != 3:
+      return
+
   let minSaltHexLength = min(policy.saltBytes, SecretHashMinSaltBytes) * 2
   let maxSaltHexLength = max(policy.saltBytes, SecretHashMaxSaltBytes) * 2
-  if parts[2].len < minSaltHexLength or parts[2].len mod 2 != 0 or
-      parts[2].len > maxSaltHexLength or not parts[2].isLowerHex():
+  if parts[saltIndex].len < minSaltHexLength or parts[saltIndex].len mod 2 != 0 or
+      parts[saltIndex].len > maxSaltHexLength or not parts[saltIndex].isLowerHex():
     return
-  if parts[3].len != SecretHashDigestBytes * 2 or not parts[3].isLowerHex():
+  if parts[digestIndex].len != SecretHashDigestBytes * 2 or
+      not parts[digestIndex].isLowerHex():
     return
 
   SecretHashParts(
-    ok: true, prefix: parts[0], iterations: iterations, salt: parts[2], digest: parts[3]
+    ok: true,
+    prefix: parts[0],
+    algorithm: algorithm,
+    iterations: iterations,
+    salt: parts[saltIndex],
+    digest: parts[digestIndex],
   )
 
 proc hashSecret*(secret: string, policy = defaultSecretHashPolicy()): string =
@@ -201,8 +269,12 @@ proc hashSecret*(secret: string, policy = defaultSecretHashPolicy()): string =
   requireValidPolicy(policy)
 
   let salt = randomHex(policy.saltBytes)
-  policy.prefix & "$" & $policy.iterations & "$" & salt & "$" &
-    secretDigest(secret, salt, policy.iterations, policy)
+  case policy.algorithm
+  of secretHashPbkdf2Sha256:
+    policy.prefix & "$" & $policy.iterations & "$" & salt & "$" &
+      secretDigest(secret, salt, policy.iterations, policy)
+  of secretHashHmacSha256:
+    policy.prefix & "$" & salt & "$" & fastHmacSha256(secret, salt)
 
 proc verifySecret*(
     secret, secretHash: string, policy = defaultSecretHashPolicy()
@@ -218,9 +290,25 @@ proc verifySecret*(
   if not parsed.ok:
     return false
 
-  constantTimeEquals(
-    secretDigest(secret, parsed.salt, parsed.iterations, policy), parsed.digest
-  )
+  let digest =
+    case parsed.algorithm
+    of secretHashPbkdf2Sha256:
+      secretDigest(
+        secret,
+        parsed.salt,
+        parsed.iterations,
+        SecretHashPolicy(
+          algorithm: secretHashPbkdf2Sha256,
+          prefix: SecretHashPrefix,
+          iterations: parsed.iterations,
+          minIterations: parsed.iterations,
+          maxIterations: parsed.iterations,
+          saltBytes: parsed.salt.len div 2,
+        ),
+      )
+    of secretHashHmacSha256:
+      fastHmacSha256(secret, parsed.salt)
+  constantTimeEquals(digest, parsed.digest)
 
 proc needsSecretRehash*(secretHash: string, policy = defaultSecretHashPolicy()): bool =
   ## Returns true when an encoded hash should be regenerated under `policy`.
@@ -231,7 +319,8 @@ proc needsSecretRehash*(secretHash: string, policy = defaultSecretHashPolicy()):
   if not parsed.ok:
     return true
 
-  parsed.iterations < policy.iterations or parsed.salt.len < policy.saltBytes * 2
+  parsed.algorithm != policy.algorithm or parsed.prefix != policy.prefix or
+    parsed.iterations < policy.iterations or parsed.salt.len < policy.saltBytes * 2
 
 proc randomSecret*(byteCount = 32): string =
   ## Generates a random secret as lowercase hex.

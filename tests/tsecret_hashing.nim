@@ -42,6 +42,49 @@ suite "secret hashing":
     check verifySecret(secret, firstHash, policy)
     check verifySecret(secret, secondHash, policy)
 
+  test "fast hashes verify high entropy machine secrets":
+    let policy = fastSecretHashPolicy()
+    let secret = randomSecret()
+    let secretHash = hashSecret(secret, policy)
+    let parts = secretHash.split('$')
+
+    check parts.len == 3
+    check parts[0] == FastSecretHashPrefix
+    check parts[1].len == SecretHashSaltBytes * 2
+    check parts[1].isLowerHex()
+    check parts[2].len == SecretHashDigestBytes * 2
+    check parts[2].isLowerHex()
+    check verifySecret(secret, secretHash, policy)
+    check verifySecret(secret, secretHash)
+    check not verifySecret("wrong-" & secret, secretHash, policy)
+    check not needsSecretRehash(secretHash, policy)
+    check needsSecretRehash(secretHash, defaultSecretHashPolicy())
+
+  test "fast hashes support custom policy prefixes":
+    let policy = SecretHashPolicy(
+      algorithm: secretHashHmacSha256,
+      prefix: "machine-hmac-sha256",
+      saltBytes: SecretHashSaltBytes,
+    )
+    let secret = randomSecret()
+    let secretHash = hashSecret(secret, policy)
+
+    check secretHash.startsWith("machine-hmac-sha256$")
+    check verifySecret(secret, secretHash, policy)
+    check not verifySecret("wrong-" & secret, secretHash, policy)
+
+  test "fast policies still verify legacy pbkdf2 hashes":
+    let fastPolicy = fastSecretHashPolicy()
+    let secret = "legacy-secret"
+    let salt = "0123456789abcdef0123456789abcdef"
+    let digest = "2e67c731630fe0443e1f3077644be57c3d19b677cb8be16fd4092836c3c0d095"
+    let secretHash =
+      SecretHashPrefix & "$" & $SecretHashMinIterations & "$" & salt & "$" & digest
+
+    check secretHash.startsWith(SecretHashPrefix & "$")
+    check verifySecret(secret, secretHash, fastPolicy)
+    check needsSecretRehash(secretHash, fastPolicy)
+
   test "parses valid hashes":
     let policy = testPolicy()
     let secretHash = hashSecret("parse-me", policy)
@@ -142,6 +185,8 @@ suite "secret hashing":
       )
     expect ValueError:
       discard pbkdf2Sha256("secret", "salt", 0, invalidPolicy)
+    expect ValueError:
+      discard pbkdf2Sha256("secret", "salt", 1, fastSecretHashPolicy())
     check not verifySecret("", hashSecret("not-empty", policy), policy)
     check not verifySecret("   ", hashSecret("not-empty", policy), policy)
     check not verifySecret(

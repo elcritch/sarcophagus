@@ -349,8 +349,13 @@ proc dummySecretHash(policy: SecretHashPolicy): string =
       policy.saltBytes
     else:
       SecretHashSaltBytes
-  prefix & "$" & $policy.iterations & "$" & "0".repeat(saltBytes * 2) & "$" &
-    "0".repeat(SecretHashDigestBytes * 2)
+  let salt = "0".repeat(saltBytes * 2)
+  let digest = "0".repeat(SecretHashDigestBytes * 2)
+  case policy.algorithm
+  of secretHashPbkdf2Sha256:
+    prefix & "$" & $policy.iterations & "$" & salt & "$" & digest
+  of secretHashHmacSha256:
+    prefix & "$" & salt & "$" & digest
 
 proc verifyDummySecret(clientSecret: string, policy: SecretHashPolicy) =
   discard verifySecret(clientSecret, dummySecretHash(policy), policy)

@@ -9,6 +9,7 @@ import ./oauth2_hashed_clients_core
 import ./secret_hashing
 
 export oauth2_hashed_clients_core
+export secret_hashing
 
 proc respondJson(
     request: Request, statusCode: int, body: string, headers: HttpHeaders

@@ -1,4 +1,4 @@
-import std/[httpclient, json, options, random, tables, unittest]
+import std/[httpclient, json, options, random, strutils, tables, unittest]
 
 import mummy
 import mummy/routers
@@ -86,6 +86,47 @@ suite "hashed oauth2 clients":
     )
     check validation.ok
     check validation.claims.subject == "reader-service"
+
+  test "seeds fast hashed clients and verifies legacy pbkdf2 clients":
+    let config = testConfig()
+    let fastPolicy = fastSecretHashPolicy()
+    let store = newInMemoryHashedOAuth2ClientStore()
+    discard seedHashedOAuth2Client(
+      store.upsertCallback(),
+      clientId = "fast-reader",
+      clientSecret = "secret-reader",
+      scopes = ["sync:read"],
+      policy = fastPolicy,
+    )
+    discard seedHashedOAuth2Client(
+      store.upsertCallback(),
+      clientId = "legacy-reader",
+      clientSecret = "secret-reader",
+      scopes = ["sync:read"],
+    )
+
+    check store.clients["fast-reader"].secretHash.startsWith(FastSecretHashPrefix & "$")
+    check store.clients["legacy-reader"].secretHash.startsWith(SecretHashPrefix & "$")
+
+    let fastResult = issueHashedClientCredentialsToken(
+      config,
+      store.loadCallback(),
+      authorizationHeader = "",
+      contentType = "application/json",
+      requestBody = """{"client_id":"fast-reader","client_secret":"secret-reader"}""",
+      policy = fastPolicy,
+    )
+    check fastResult.ok
+
+    let legacyResult = issueHashedClientCredentialsToken(
+      config,
+      store.loadCallback(),
+      authorizationHeader = "",
+      contentType = "application/json",
+      requestBody = """{"client_id":"legacy-reader","client_secret":"secret-reader"}""",
+      policy = fastPolicy,
+    )
+    check legacyResult.ok
 
   test "rejects disabled clients and bad secrets":
     let config = testConfig()

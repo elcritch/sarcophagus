@@ -287,12 +287,21 @@ OpenAPI metadata stays in sync with runtime enforcement.
 
 ## `sarcophagus/security/secret_hashing`
 
-`sarcophagus/security/secret_hashing` uses BearSSL to provide generic PBKDF2-HMAC-SHA256 hashing for passwords, client secrets, API keys, and other user-provided secrets.
+`sarcophagus/security/secret_hashing` uses BearSSL to provide generic secret
+hashing. The default policy is PBKDF2-HMAC-SHA256 for human-chosen passwords and
+other potentially weak secrets. A fast HMAC-SHA256 policy is also available for
+high-entropy machine secrets such as generated OAuth client secrets.
 
-Hashes are stored as:
+PBKDF2 hashes are stored as:
 
 ```text
 pbkdf2-sha256$iterations$saltHex$digestHex
+```
+
+Fast machine-secret hashes are stored as:
+
+```text
+hmac-sha256$saltHex$digestHex
 ```
 
 Typical use:
@@ -304,6 +313,13 @@ let storedHash = hashSecret("client-secret")
 
 doAssert verifySecret("client-secret", storedHash)
 doAssert not verifySecret("wrong-secret", storedHash)
+```
+
+For generated machine credentials, opt into fast hashing:
+
+```nim
+let policy = fastSecretHashPolicy()
+let storedHash = hashSecret(randomSecret(), policy)
 ```
 
 Use `needsSecretRehash` after successful verification when you raise iteration
@@ -320,6 +336,7 @@ Custom policies let an application tune generation and accepted legacy bounds:
 
 ```nim
 let policy = SecretHashPolicy(
+  algorithm: secretHashPbkdf2Sha256,
   prefix: SecretHashPrefix,
   iterations: 750_000,
   minIterations: SecretHashMinIterations,
@@ -368,6 +385,30 @@ router.registerHashedOAuth2(
 The token endpoint verifies `client_secret` with `verifySecret`, rejects disabled
 clients, mints the same Sarcophagus bearer tokens as `sarcophagus/oauth2`, and
 can emit best-effort audit events through `onAudit`.
+
+For generated OAuth client secrets, use `fastSecretHashPolicy()` when seeding and
+when registering the token endpoint:
+
+```nim
+let policy = fastSecretHashPolicy()
+
+discard seedHashedOAuth2Client(
+  persistClient,
+  clientId = "reader-app",
+  scopes = ["items:read"],
+  policy = policy,
+)
+
+router.registerHashedOAuth2(
+  oauthConfig,
+  loadClientFromDb,
+  policy = policy,
+)
+```
+
+Existing PBKDF2 client hashes still verify under the fast policy because the
+stored prefix selects the verification algorithm. `needsSecretRehash` returns
+true for those legacy hashes so they can be rotated to the fast format.
 
 ## `sarcophagus/core/jwt_bearer_tokens`
 
