@@ -16,3 +16,6 @@ feature "cbor":
 feature "jsony":
   requires "jsony"
 
+feature "msgpack":
+  requires "msgpack4nim"
+
