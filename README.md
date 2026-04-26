@@ -307,6 +307,52 @@ let validation = validateOAuth2BearerToken(
 For TAPIS routes, prefer `security = oauth2(...)` or `withSecurity(...)` so
 OpenAPI metadata stays in sync with runtime enforcement.
 
+## `sarcophagus/secret_hashing`
+
+`sarcophagus/secret_hashing` uses BearSSL to provide generic PBKDF2-HMAC-SHA256 hashing for passwords, client secrets, API keys, and other user-provided secrets.
+
+Hashes are stored as:
+
+```text
+pbkdf2-sha256$iterations$saltHex$digestHex
+```
+
+Typical use:
+
+```nim
+import sarcophagus/secret_hashing
+
+let storedHash = hashSecret("client-secret")
+
+doAssert verifySecret("client-secret", storedHash)
+doAssert not verifySecret("wrong-secret", storedHash)
+```
+
+Use `needsSecretRehash` after successful verification when you raise iteration
+counts or salt sizes:
+
+```nim
+if verifySecret(candidateSecret, storedHash):
+  if needsSecretRehash(storedHash):
+    let upgradedHash = hashSecret(candidateSecret)
+    discard upgradedHash # persist this over the old hash
+```
+
+Custom policies let an application tune generation and accepted legacy bounds:
+
+```nim
+let policy = SecretHashPolicy(
+  prefix: SecretHashPrefix,
+  iterations: 750_000,
+  minIterations: SecretHashMinIterations,
+  maxIterations: SecretHashMaxIterations,
+  saltBytes: SecretHashSaltBytes,
+)
+
+let storedHash = hashSecret("client-secret", policy)
+doAssert verifySecret("client-secret", storedHash, policy)
+```
+
 ## `sarcophagus/core/jwt_bearer_tokens`
 
 The bearer-token module mints and validates signed HS256 JWT bearer tokens. OAuth2
