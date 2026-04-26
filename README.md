@@ -2,6 +2,16 @@
 
 Sarcophagus is a FastAPI inspired higher-level API layer for [Mummy](https://github.com/guzba/mummy). Its TAPIS modules turn typed Nim procs into HTTP handlers, JSON/CBOR codecs, OpenAPI route metadata, and OAuth2-protected endpoints.
 
+## Installation
+
+```sh
+atlas use https://github.com/elcritch/sarcophagus
+# or
+nimble install https://github.com/elcritch/sarcophagus
+```
+
+Note, `jwt` can cause issues during installation. Add `requires "jwt >= 0.3"` to your nimble file if you get `jwt` issues.
+
 ## Basic Example
 
 ```nim
@@ -37,7 +47,6 @@ newServer(api.router).serve(Port(8080), address = "127.0.0.1")
 Run it with:
 
 ```sh
-atlas install
 nim c -r --path:src server.nim
 ```
 
