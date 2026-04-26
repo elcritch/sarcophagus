@@ -145,8 +145,9 @@ proc updateItem(input: ApiRequest[ItemPath, CreateItemBody]): ItemOut {.
   ItemOut(id: input.params.id, name: input.body.name, count: input.body.count)
 ```
 
-By default, TAPIS supports JSON. Compile with `-d:feature.sarcophagus.cbor` to
-enable CBOR request/response negotiation.
+By default, TAPIS supports JSON. Compile with `-d:feature.sarcophagus.cbor` or
+`-d:feature.sarcophagus.msgpack` to enable CBOR or MessagePack request/response
+negotiation.
 
 Error handling is automatic for TAPIS routes:
 

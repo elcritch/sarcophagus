@@ -205,6 +205,8 @@ proc contentSchema*(schema: JsonNode): JsonNode =
   result["application/json"] = %*{"schema": schema}
   when defined(feature.sarcophagus.cbor):
     result["application/cbor"] = %*{"schema": schema}
+  when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+    result["application/msgpack"] = %*{"schema": schema}
 
 proc endpointOperation*[In, Out](
     httpMethod, path: string,

@@ -11,10 +11,16 @@ when defined(feature.sarcophagus.cbor):
   import cborious/cbor2json
   export cborious
 
+when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+  import msgpack4nim
+  import msgpack4nim/msgpack2json
+  export msgpack4nim
+
 type
   ApiFormat* = enum
     apiJson
     apiCbor
+    apiMsgPack
 
   ApiDecodeSource* = enum
     adsNone
@@ -53,6 +59,7 @@ type
 const
   jsonContentType* = "application/json; charset=utf-8"
   cborContentType* = "application/cbor"
+  msgPackContentType* = "application/msgpack"
 
 when defined(feature.sarcophagus.cbor):
   const apiCborEncodingMode = {CborObjToMap, CborEnumAsString, CborCheckHoleyEnums}
@@ -65,6 +72,9 @@ proc defaultApiConfig*(): ApiConfig =
   when defined(feature.sarcophagus.cbor):
     result.requestFormats.incl apiCbor
     result.responseFormats.incl apiCbor
+  when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+    result.requestFormats.incl apiMsgPack
+    result.responseFormats.incl apiMsgPack
 
 proc apiResponse*[T](
     body: sink T, statusCode = 200, headers: openArray[ApiHeader] = []
@@ -97,10 +107,16 @@ proc mediaMatches*(raw, exact, suffix: string): bool =
   let value = mediaType(raw)
   value == exact or value.endsWith(suffix)
 
+proc mediaMatchesMsgPack*(raw: string): bool =
+  let value = mediaType(raw)
+  value == "application/msgpack" or value == "application/x-msgpack" or
+    value.endsWith("+msgpack")
+
 proc formatContentType*(format: ApiFormat): string =
   case format
   of apiJson: jsonContentType
   of apiCbor: cborContentType
+  of apiMsgPack: msgPackContentType
 
 proc requestFormat*(contentType: string, config: ApiConfig): ApiFormat =
   if contentType.len == 0:
@@ -112,6 +128,14 @@ proc requestFormat*(contentType: string, config: ApiConfig): ApiFormat =
     when defined(feature.sarcophagus.cbor):
       if apiCbor in config.requestFormats:
         return apiCbor
+    else:
+      discard
+  elif mediaMatchesMsgPack(contentType):
+    when defined(feature.sarcophagus.msgpack) or defined(
+      feature.sarcophagus.msgpack4nim
+    ):
+      if apiMsgPack in config.requestFormats:
+        return apiMsgPack
     else:
       discard
 
@@ -130,6 +154,14 @@ proc acceptTokenFormat(token: string, config: ApiConfig): Option[ApiFormat] =
     when defined(feature.sarcophagus.cbor):
       if apiCbor in config.responseFormats:
         return some(apiCbor)
+    else:
+      discard
+  if mediaMatchesMsgPack(value):
+    when defined(feature.sarcophagus.msgpack) or defined(
+      feature.sarcophagus.msgpack4nim
+    ):
+      if apiMsgPack in config.responseFormats:
+        return some(apiMsgPack)
     else:
       discard
   none(ApiFormat)
@@ -174,6 +206,19 @@ when defined(feature.sarcophagus.cbor):
     else:
       fromCbor(body, T, apiCborEncodingMode)
 
+when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+  proc encodeMsgPackApi*[T](value: T): string =
+    when T is JsonNode:
+      msgpack2json.fromJsonNode(value)
+    else:
+      msgpack2json.fromJsonNode(parseJson(encodeJsonApi(value)))
+
+  proc decodeMsgPackApi*[T](body: string, target: typedesc[T]): T =
+    when T is JsonNode:
+      msgpack2json.toJsonNode(body)
+    else:
+      decodeJsonApi($msgpack2json.toJsonNode(body), T)
+
 proc encodeApi*[T](value: T, format: ApiFormat): string =
   case format
   of apiJson:
@@ -183,6 +228,13 @@ proc encodeApi*[T](value: T, format: ApiFormat): string =
       encodeCborApi(value)
     else:
       raiseApiError(406, "CBOR responses are not enabled", "cbor_not_enabled")
+  of apiMsgPack:
+    when defined(feature.sarcophagus.msgpack) or defined(
+      feature.sarcophagus.msgpack4nim
+    ):
+      encodeMsgPackApi(value)
+    else:
+      raiseApiError(406, "MessagePack responses are not enabled", "msgpack_not_enabled")
 
 proc decodeApi*[T](body: string, format: ApiFormat, target: typedesc[T]): T =
   case format
@@ -193,6 +245,13 @@ proc decodeApi*[T](body: string, format: ApiFormat, target: typedesc[T]): T =
       decodeCborApi(body, T)
     else:
       raiseApiError(415, "CBOR requests are not enabled", "cbor_not_enabled")
+  of apiMsgPack:
+    when defined(feature.sarcophagus.msgpack) or defined(
+      feature.sarcophagus.msgpack4nim
+    ):
+      decodeMsgPackApi(body, T)
+    else:
+      raiseApiError(415, "MessagePack requests are not enabled", "msgpack_not_enabled")
 
 proc parseBoolParam(raw, name: string): bool =
   case raw.strip().toLowerAscii()

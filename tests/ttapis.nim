@@ -7,6 +7,9 @@ import sarcophagus/tapis
 when defined(feature.sarcophagus.cbor):
   import cborious
 
+when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+  import msgpack4nim/msgpack2json
+
 type
   ServerThreadArgs = object
     server: Server
@@ -366,3 +369,27 @@ suite "typed mummy tapis":
         )
         check body.name == "binary"
         check body.count == 8
+
+  when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+    test "negotiates msgpack request and response bodies":
+      withTestServer do(baseUrl: string):
+        var client = newHttpClient(timeout = 5_000)
+        defer:
+          client.close()
+
+        let headers = newHttpHeaders(
+          {"Content-Type": "application/msgpack", "Accept": "application/msgpack"}
+        )
+        let requestBody = msgpack2json.fromJsonNode(%*{"name": "packed", "count": 11})
+        let response = client.request(
+          baseUrl & "/items",
+          httpMethod = HttpPost,
+          body = requestBody,
+          headers = headers,
+        )
+        check response.code.int == 201
+        check response.headers["Content-Type"] == "application/msgpack"
+
+        let body = msgpack2json.toJsonNode(response.body)
+        check body["name"].getStr() == "packed"
+        check body["count"].getInt() == 11
