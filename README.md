@@ -111,8 +111,19 @@ proc createItem(
   apiResponse(ItemOut(name: body.name, count: body.count), statusCode = 201)
 ```
 
-Use `ApiRequest[Params, Body]` when a route needs both path/query parameters and
-a request body:
+Use `Body[T]` when a flat route needs both path/query parameters and a request
+body:
+
+```nim
+proc updateItem(
+    body: Body[CreateItemBody],
+    id: int,
+    notify: Option[bool],
+): ItemOut {.tapi(put, "/items/@id", summary = "Update item").} =
+  ItemOut(id: id, name: body.name, count: body.count)
+```
+
+Use `ApiRequest[Params, Body]` when grouped path/query parameters are clearer:
 
 ```nim
 type ItemPath = object

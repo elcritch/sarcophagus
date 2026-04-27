@@ -108,6 +108,28 @@ proc createItem(body: ItemBody): ApiResponse[ItemOut] {.gcsafe.} =
     statusCode = 201,
   )
 
+proc createBulkItem(
+    body: Body[ItemBody], id: int, verbose: Option[bool]
+): ItemOut {.gcsafe.} =
+  ItemOut(
+    id: id, name: body.name, count: body.count, verbose: verbose.get(false), mode: ""
+  )
+
+proc createQueriedItem(
+    body: Body[ItemBody], verbose: Option[bool], mode: Option[ItemMode]
+): ItemOut {.gcsafe.} =
+  ItemOut(
+    id: 0,
+    name: body.name,
+    count: body.count,
+    verbose: verbose.get(false),
+    mode:
+      if mode.isSome():
+        $mode.get()
+      else:
+        "",
+  )
+
 proc upsertItem(input: ApiRequest[ItemPath, ItemBody]): ItemOut {.gcsafe.} =
   ItemOut(
     id: input.params.id,
@@ -139,6 +161,8 @@ proc buildApi(includeStackTraces = false): ApiRouter =
   api.get("/flat-items/@id", getFlatItem, summary = "Get flat item")
   api.add(readFlatItem)
   api.post("/items", createItem, summary = "Create item", responseStatus = 201)
+  api.post("/bulk-items/@id", createBulkItem, summary = "Create bulk item")
+  api.post("/queried-items", createQueriedItem, summary = "Create queried item")
   api.put("/items/@id", upsertItem, summary = "Upsert item")
   api.get("/tuple-items/@id", getNamedTupleItem, summary = "Get tuple item")
   api.get("/unnamed-tuple", getUnnamedTupleItem, summary = "Get unnamed tuple")
@@ -287,6 +311,49 @@ suite "typed mummy tapis":
       check body["name"].getStr() == "probe"
       check body["count"].getInt() == 3
 
+  test "parses explicit body marker with flat path and query parameters":
+    withTestServer do(baseUrl: string):
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let headers = newHttpHeaders({"Content-Type": "application/json"})
+      let response = client.request(
+        baseUrl & "/bulk-items/16?verbose=true",
+        httpMethod = HttpPost,
+        body = """{"name":"bulk","count":6}""",
+        headers = headers,
+      )
+      check response.code.int == 200
+
+      let body = parseJson(response.body)
+      check body["id"].getInt() == 16
+      check body["name"].getStr() == "bulk"
+      check body["count"].getInt() == 6
+      check body["verbose"].getBool() == true
+
+  test "parses explicit body marker with query parameters only":
+    withTestServer do(baseUrl: string):
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let headers = newHttpHeaders({"Content-Type": "application/json"})
+      let response = client.request(
+        baseUrl & "/queried-items?verbose=true&mode=modeSlow",
+        httpMethod = HttpPost,
+        body = """{"name":"queried","count":4}""",
+        headers = headers,
+      )
+      check response.code.int == 200
+
+      let body = parseJson(response.body)
+      check body["id"].getInt() == 0
+      check body["name"].getStr() == "queried"
+      check body["count"].getInt() == 4
+      check body["verbose"].getBool() == true
+      check body["mode"].getStr() == "modeSlow"
+
   test "combines path params and request bodies":
     withTestServer do(baseUrl: string):
       var client = newHttpClient(timeout = 5_000)
@@ -364,6 +431,20 @@ suite "typed mummy tapis":
       let postOperation = spec["paths"]["/items"]["post"]
       check postOperation["requestBody"]["required"].getBool() == true
       check postOperation["responses"].hasKey("201")
+
+      let bulkOperation = spec["paths"]["/bulk-items/{id}"]["post"]
+      check bulkOperation["parameters"][0]["name"].getStr() == "id"
+      check bulkOperation["parameters"][0]["in"].getStr() == "path"
+      check bulkOperation["parameters"][1]["name"].getStr() == "verbose"
+      check bulkOperation["parameters"][1]["in"].getStr() == "query"
+      check bulkOperation["requestBody"]["required"].getBool() == true
+
+      let queriedOperation = spec["paths"]["/queried-items"]["post"]
+      check queriedOperation["parameters"][0]["name"].getStr() == "verbose"
+      check queriedOperation["parameters"][0]["in"].getStr() == "query"
+      check queriedOperation["parameters"][1]["name"].getStr() == "mode"
+      check queriedOperation["parameters"][1]["in"].getStr() == "query"
+      check queriedOperation["requestBody"]["required"].getBool() == true
 
   when defined(feature.sarcophagus.cbor):
     test "negotiates cbor request and response bodies":

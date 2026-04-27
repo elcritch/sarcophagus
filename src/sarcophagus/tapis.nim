@@ -252,6 +252,30 @@ proc addEndpointWithParams*[Out](
   ## Adds endpoint metadata with inferred output type.
   addEndpointWithParams(api, httpMethod, path, meta, parameters, Out)
 
+proc addEndpointWithParamsAndBody*[Body, Out](
+    api: ApiRouter,
+    httpMethod, path: string,
+    meta: EndpointMeta,
+    parameters: JsonNode,
+    body: typedesc[Body],
+    output: typedesc[Out],
+) =
+  ## Adds endpoint metadata for flat handlers with path/query params and a body.
+  api.components.addOpenApiSecuritySchemes(meta.security)
+  swagger.addEndpointWithParamsAndBody(
+    api.paths, httpMethod, path, meta, parameters, Body, Out
+  )
+
+proc addEndpointWithParamsAndBody*[Body, Out](
+    api: ApiRouter,
+    httpMethod, path: string,
+    meta: EndpointMeta,
+    parameters: JsonNode,
+    body: typedesc[Body],
+) =
+  ## Adds endpoint metadata for flat handlers with inferred output type.
+  addEndpointWithParamsAndBody(api, httpMethod, path, meta, parameters, Body, Out)
+
 proc addRequestHandler*(
     api: ApiRouter, httpMethod, path: string, handler: RequestHandler
 ) =
@@ -423,6 +447,15 @@ proc isRequestType(node: NimNode): bool =
 proc isParamsType(node: NimNode): bool =
   node.typeName().normalize() == "params"
 
+proc isBodyType(node: NimNode): bool =
+  node.typeName().normalize() == "body"
+
+proc bodyInnerType(node: NimNode): NimNode =
+  if node.isBodyType() and node.kind == nnkBracketExpr and node.len >= 2:
+    node[1].copyNimTree()
+  else:
+    node.copyNimTree()
+
 proc isApiRequestType(node: NimNode): bool =
   node.typeName() == "ApiRequest"
 
@@ -470,6 +503,10 @@ proc sourceName(node: NimNode): string =
   node.typeName().normalize()
 
 proc canUseDirectRoute(params: seq[HandlerParam], source: NimNode): bool =
+  for param in params:
+    if param.typeNode.isBodyType():
+      return false
+
   let source = source.sourceName()
   if params.len == 0:
     return true
@@ -507,7 +544,116 @@ proc buildRouteHandler(
   if start >= signature.params.len:
     error("flat TAPIS handlers need at least one request parameter", handler)
 
-  if source.sourceName() != "adsparams":
+  let sourceKind = source.sourceName()
+  var bodyIndex = -1
+  for index in start ..< signature.params.len:
+    if signature.params[index].typeNode.isBodyType():
+      if bodyIndex >= 0:
+        error("flat TAPIS handlers support only one Body[T] parameter", handler)
+      bodyIndex = index
+
+  if bodyIndex >= 0 and sourceKind != "adsbody":
+    error(
+      "Body[T] parameters require a body route such as post, put, or patch", handler
+    )
+
+  if sourceKind == "adsbody" and bodyIndex >= 0:
+    let returnType = signature.returnType
+    let requestType = bindSym"Request"
+    let respondRouteValueSym = bindSym"respondRouteValue"
+    let wrapperName = genSym(nskProc, "tapisWrapper")
+    let requestName = genSym(nskParam, "request")
+    let routeMeta = genSym(nskLet, "routeMeta")
+    let routeConfig = genSym(nskLet, "routeConfig")
+    let routeStatus = genSym(nskLet, "routeStatus")
+    let parametersName = genSym(nskVar, "parameters")
+    var parseStmts = newStmtList()
+    var schemaStmts = newStmtList()
+    var callArgs: seq[NimNode]
+    let bodyType = signature.params[bodyIndex].typeNode.bodyInnerType()
+
+    if start == 1:
+      callArgs.add requestName
+
+    for index in start ..< signature.params.len:
+      let param = signature.params[index]
+      let valueName = genSym(nskLet, param.name)
+
+      if index == bodyIndex:
+        let decodeCall = newCall(
+          newTree(nnkBracketExpr, bindSym"decodeRequestBody", bodyType.copyNimTree()),
+          requestName,
+          routeConfig,
+          bodyType.copyNimTree(),
+        )
+        parseStmts.add quote do:
+          let `valueName` = `decodeCall`
+        callArgs.add valueName
+        continue
+
+      if param.typeNode.isGroupedValueType():
+        error("grouped path/query parameters must use Params[T]", param.typeNode)
+
+      let paramName = newLit(param.name)
+      let paramType = param.typeNode.copyNimTree()
+      let parseCall = newCall(
+        newTree(
+          nnkBracketExpr, bindSym"parseRequestParamValue", paramType.copyNimTree()
+        ),
+        requestName,
+        paramName,
+      )
+      let schemaCall = newCall(
+        newTree(nnkBracketExpr, bindSym"addParameterSchema", paramType.copyNimTree()),
+        parametersName,
+        path,
+        paramName,
+      )
+      parseStmts.add quote do:
+        let `valueName` = `parseCall`
+      schemaStmts.add schemaCall
+      callArgs.add valueName
+
+    let handlerCall = newCall(handlerTarget, callArgs)
+    let addEndpointCall = newCall(
+      newTree(
+        nnkBracketExpr,
+        bindSym"addEndpointWithParamsAndBody",
+        bodyType.copyNimTree(),
+        returnType.copyNimTree(),
+      ),
+      api,
+      httpMethod,
+      path,
+      routeMeta,
+      parametersName,
+      bodyType.copyNimTree(),
+    )
+    return quote:
+      block:
+        let `routeMeta` = `meta`
+        let `routeConfig` = `api`.config
+        let `routeStatus` = `routeMeta`.responseStatus
+        var `parametersName` = newParameterSchemas()
+        `schemaStmts`
+        `addEndpointCall`
+        proc `wrapperName`(`requestName`: `requestType`) {.gcsafe.} =
+          try:
+            `parseStmts`
+            `respondRouteValueSym`(
+              `requestName`, `handlerCall`, `routeConfig`, `routeStatus`
+            )
+          except CatchableError as e:
+            `requestName`.respondApiError(e, `routeConfig`)
+
+        addRequestHandler(
+          `api`,
+          `httpMethod`,
+          `path`,
+          secureRequestHandler(`wrapperName`, `routeMeta`.security),
+        )
+
+  if sourceKind != "adsparams":
     error("flat TAPIS handlers currently decode path/query parameters only", handler)
 
   let returnType = signature.returnType

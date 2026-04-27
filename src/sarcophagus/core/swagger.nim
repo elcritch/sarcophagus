@@ -282,6 +282,17 @@ proc endpointOperationWithParams*[Out](
       "500": {"description": "Internal server error"},
     }
 
+proc endpointOperationWithParamsAndBody*[Body, Out](
+    httpMethod, path: string,
+    meta: EndpointMeta,
+    parameters: JsonNode,
+    body: typedesc[Body],
+    output: typedesc[Out],
+): JsonNode =
+  result = endpointOperationWithParams(httpMethod, path, meta, parameters, Out)
+  result["requestBody"] =
+    %*{"required": true, "content": contentSchema(requestBodySchema(Body))}
+
 proc addEndpoint*[In, Out](
     paths: JsonNode,
     httpMethod, path: string,
@@ -308,6 +319,20 @@ proc addEndpointWithParams*[Out](
     paths[apiPath] = newJObject()
   paths[apiPath][httpMethod.toLowerAscii()] =
     endpointOperationWithParams(httpMethod, path, meta, parameters, Out)
+
+proc addEndpointWithParamsAndBody*[Body, Out](
+    paths: JsonNode,
+    httpMethod, path: string,
+    meta: EndpointMeta,
+    parameters: JsonNode,
+    body: typedesc[Body],
+    output: typedesc[Out],
+) =
+  let apiPath = openApiPath(path)
+  if apiPath notin paths:
+    paths[apiPath] = newJObject()
+  paths[apiPath][httpMethod.toLowerAscii()] =
+    endpointOperationWithParamsAndBody(httpMethod, path, meta, parameters, Body, Out)
 
 proc openApiJson*(title, version: string, paths: JsonNode): JsonNode =
   %*{"openapi": "3.1.0", "info": {"title": title, "version": version}, "paths": paths}

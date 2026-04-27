@@ -32,6 +32,7 @@ type
   EmptyBody* = object
 
   Params*[T] = T
+  Body*[T] = T
 
   ApiRequest*[Params, Body] = object
     params*: Params
