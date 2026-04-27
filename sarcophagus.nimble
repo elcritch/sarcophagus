@@ -1,4 +1,4 @@
-version       = "0.6.2"
+version       = "0.6.3"
 author        = "Jaremy Creechley"
 description   = "mummy higher level api wrapper"
 license       = "BSD-2-Clause"
