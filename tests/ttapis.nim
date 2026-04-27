@@ -1,6 +1,7 @@
 import std/[httpclient, json, options, random, unittest]
 
 import mummy
+import mummy/routers
 
 import sarcophagus/tapis
 
@@ -122,11 +123,17 @@ proc valueErrorHandler(): ItemOut {.gcsafe.} =
 proc apiErrorHandler(): ItemOut {.gcsafe.} =
   raiseApiError(409, "item conflict", "item_conflict", %*{"id": 42})
 
+proc rawMummyStatus(request: Request) {.gcsafe.} =
+  var headers: mummy.HttpHeaders
+  headers["Content-Type"] = "application/json; charset=utf-8"
+  request.respond(200, headers, """{"status":"raw-mummy"}""")
+
 proc buildApi(includeStackTraces = false): ApiRouter =
   var config = defaultApiConfig()
   config.includeStackTraces = includeStackTraces
 
   let api = initApiRouter("Typed Test API", "1.2.3", config)
+  api.router.get("/raw-status", rawMummyStatus)
   api.get("/items/@id", getItem, summary = "Get item", tags = ["items"])
   api.add(readItem)
   api.get("/flat-items/@id", getFlatItem, summary = "Get flat item")
@@ -171,6 +178,22 @@ suite "typed mummy tapis":
       check body["id"].getInt() == 7
       check body["verbose"].getBool() == true
       check body["mode"].getStr() == "modeFast"
+
+  test "mixes regular mummy handlers with typed tapis handlers":
+    withTestServer do(baseUrl: string):
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let rawResponse = client.get(baseUrl & "/raw-status")
+      check rawResponse.code.int == 200
+      check parseJson(rawResponse.body)["status"].getStr() == "raw-mummy"
+
+      let typedResponse = client.get(baseUrl & "/items/17?verbose=true")
+      check typedResponse.code.int == 200
+      let typedBody = parseJson(typedResponse.body)
+      check typedBody["id"].getInt() == 17
+      check typedBody["verbose"].getBool() == true
 
   test "registers tapi pragma handlers with api.add":
     withTestServer do(baseUrl: string):
