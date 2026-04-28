@@ -10,6 +10,9 @@ requires "jwt >= 0.3"
 requires "bearssl >= 0.2.8"
 requires "https://github.com/yglukhov/bearssl_pkey_decoder#546f8d9b"
 
+feature "dev":
+  requires "karax"
+
 feature "cbor":
   requires "cborious"
 
