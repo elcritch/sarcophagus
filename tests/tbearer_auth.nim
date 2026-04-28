@@ -24,6 +24,15 @@ proc okHandler(request: Request) {.gcsafe.} =
 proc claimsHandler(request: Request, claims: BearerTokenClaims) {.gcsafe.} =
   request.respondJson(200, %*{"subject": claims.subject, "scopes": claims.scopes})
 
+proc customAuthError(failure: TokenValidationFailure): BearerAuthApiError {.gcsafe.} =
+  apiResponse(
+    BearerAuthErrorResponse(
+      status: "custom-error",
+      error: BearerAuthFailurePayload(code: failure.code, message: failure.message),
+    ),
+    statusCode = 499,
+  )
+
 suite "mummy bearer auth":
   test "macro and proc forms both protect routes and pass claims through":
     randomize()
@@ -98,3 +107,41 @@ suite "mummy bearer auth":
       let claimsBody = parseJson(claimsResponse.body)
       check claimsBody["subject"].getStr() == "client-1"
       check claimsBody["scopes"][0].getStr() == "sync:read"
+
+  test "protected routes accept typed error responders":
+    randomize()
+    let config = initBearerTokenConfig(
+      issuer = "sam-sync-server",
+      audience = "sam-sync-api",
+      keys = [SigningKey(kid: "v1", secret: "secret-a")],
+    )
+
+    var router: Router
+    router.get(
+      "/protected",
+      bearerTokAuth(okHandler, config, ["sync:read"], onError = customAuthError),
+    )
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let response = client.get("http://127.0.0.1:" & $portNumber & "/protected")
+
+    check response.code.int == 499
+    let body = parseJson(response.body)
+    check body["status"].getStr() == "custom-error"
+    check body["error"]["code"].getStr() == "missing_token"

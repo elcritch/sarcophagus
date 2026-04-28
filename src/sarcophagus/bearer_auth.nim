@@ -1,13 +1,27 @@
-import std/[json, macros]
+import std/macros
 
 import mummy
 
 import ./core/jwt_bearer_tokens
+import ./tapis_utils
+
+export tapis_utils
 
 type
+  BearerAuthFailurePayload* = object
+    ## Bearer auth error details serialized in error responses.
+    code*: string
+    message*: string
+
+  BearerAuthErrorResponse* = object ## JSON returned by bearer auth error responses.
+    status*: string
+    error*: BearerAuthFailurePayload
+
+  BearerAuthApiError* = ApiResponse[BearerAuthErrorResponse]
+
   AuthErrorResponder* =
-    proc(request: Request, failure: TokenValidationFailure) {.gcsafe.}
-    ## Callback used when bearer-token validation fails for a Mummy request.
+    proc(failure: TokenValidationFailure): BearerAuthApiError {.gcsafe.}
+    ## Callback used to build bearer-token validation error responses.
 
   AuthenticatedRequestHandler* =
     proc(request: Request, claims: BearerTokenClaims) {.gcsafe.}
@@ -16,24 +30,25 @@ type
 const routeRegistrationNames =
   ["addRoute", "get", "head", "post", "put", "delete", "options", "patch"]
 
-proc respondJson(request: Request, statusCode: int, body: string) =
-  var headers: HttpHeaders
-  headers["Content-Type"] = "application/json; charset=utf-8"
-  if request.httpMethod == "HEAD":
-    headers["Content-Length"] = $body.len
-    request.respond(statusCode, headers)
-  else:
-    request.respond(statusCode, headers, body)
+proc bearerAuthFailurePayload(
+    failure: TokenValidationFailure
+): BearerAuthFailurePayload =
+  BearerAuthFailurePayload(code: failure.code, message: failure.message)
+
+proc bearerAuthErrorResponse*(
+    statusCode: int, failure: TokenValidationFailure
+): BearerAuthApiError =
+  ## Builds a typed bearer auth error response.
+  apiResponse(
+    BearerAuthErrorResponse(status: "error", error: failure.bearerAuthFailurePayload()),
+    statusCode,
+  )
 
 proc defaultAuthErrorResponder*(
-    request: Request, failure: TokenValidationFailure
-) {.gcsafe.} =
-  ## Writes a default JSON error response for bearer-token validation failures.
-  let body =
-    $(
-      %*{"status": "error", "error": {"code": failure.code, "message": failure.message}}
-    )
-  request.respondJson(failure.statusCode, body)
+    failure: TokenValidationFailure
+): BearerAuthApiError {.gcsafe.} =
+  ## Builds the default JSON error response for bearer-token validation failures.
+  bearerAuthErrorResponse(failure.statusCode, failure)
 
 proc validateBearerRequest*(
     request: Request, config: BearerTokenConfig, requiredScopes: openArray[string] = []
@@ -57,7 +72,7 @@ proc requireBearerAuth*(
   if validation.ok:
     return true
 
-  onError(request, validation.failure)
+  request.respondTypedApiValue(onError(validation.failure))
   false
 
 proc bearerTokAuth*(
@@ -84,7 +99,7 @@ proc bearerTokAuth*(
   return proc(request: Request) {.gcsafe.} =
     let validation = validateBearerRequest(request, config, scopes)
     if not validation.ok:
-      onError(request, validation.failure)
+      request.respondTypedApiValue(onError(validation.failure))
       return
     wrapped(request, validation.claims)
 
