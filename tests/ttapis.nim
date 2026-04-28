@@ -174,13 +174,7 @@ proc buildApi(includeStackTraces = false): ApiRouter =
           "read": apiExample(
             summary = "Read item",
             value =
-              %*{
-                "id": 8,
-                "name": "read-8",
-                "count": 1,
-                "verbose": true,
-                "mode": "modeSlow",
-              },
+              ItemOut(id: 8, name: "read-8", count: 1, verbose: true, mode: "modeSlow"),
           )
         },
       )
@@ -193,7 +187,7 @@ proc buildApi(includeStackTraces = false): ApiRouter =
     request = apiRequestDoc(
       examples = {
         "added": apiExample(
-          summary = "Added item request", value = %*{"name": "added", "count": 7}
+          summary = "Added item request", value = ItemBody(name: "added", count: 7)
         )
       }
     ),
@@ -206,8 +200,11 @@ proc buildApi(includeStackTraces = false): ApiRouter =
     request = apiRequestDoc(
       examples = {
         "create": apiExample(
-          summary = "Create item request", value = %*{"name": "probe", "count": 3}
-        )
+          summary = "Create item request", value = ItemBody(name: "probe", count: 3)
+        ),
+        "raw": apiExample(
+          summary = "Raw JSON request", value = %*{"name": "raw", "count": 5}
+        ),
       }
     ),
     responses = {
@@ -216,9 +213,13 @@ proc buildApi(includeStackTraces = false): ApiRouter =
         examples = {
           "created": apiExample(
             summary = "Created item",
+            value = ItemOut(id: 42, name: "probe", count: 3, verbose: false, mode: ""),
+          ),
+          "raw": apiExample(
+            summary = "Raw JSON response",
             value =
-              %*{"id": 42, "name": "probe", "count": 3, "verbose": false, "mode": ""},
-          )
+              %*{"id": 43, "name": "raw", "count": 5, "verbose": false, "mode": ""},
+          ),
         },
       )
     },
@@ -538,6 +539,9 @@ suite "typed mummy tapis":
       check postOperation["requestBody"]["content"]["application/json"]["examples"][
         "create"
       ]["summary"].getStr() == "Create item request"
+      check postOperation["requestBody"]["content"]["application/json"]["examples"][
+        "raw"
+      ]["value"]["name"].getStr() == "raw"
       check postOperation["responses"].hasKey("201")
       let createdResponse = postOperation["responses"]["201"]
       check createdResponse["description"].getStr() == "Created item response"
@@ -545,6 +549,9 @@ suite "typed mummy tapis":
       check createdResponse["content"]["application/json"]["examples"]["created"][
         "summary"
       ].getStr() == "Created item"
+      check createdResponse["content"]["application/json"]["examples"]["raw"]["value"][
+        "id"
+      ].getInt() == 43
 
       let readOperation = spec["paths"]["/read-items/{id}"]["get"]
       let readResponse = readOperation["responses"]["200"]

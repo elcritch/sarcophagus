@@ -41,6 +41,11 @@ proc apiExample*(
     externalValue: externalValue,
   )
 
+proc apiExample*[T](
+    summary = "", description = "", value: T, externalValue = ""
+): ApiExample =
+  apiExample(summary, description, parseJson(encodeJsonApi(value)), externalValue)
+
 proc apiResponseDoc*(
     description = "",
     contentType = "application/json",

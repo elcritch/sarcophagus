@@ -204,10 +204,11 @@ when isMainModule:
       examples = {
         "cat": apiExample(
           summary = "Create a cat",
-          value = %*{"name": "Ada", "species": "cat", "age": 4},
+          value = CreatePetBody(name: "Ada", species: "cat", age: some(4)),
         ),
         "dog": apiExample(
-          summary = "Create a dog", value = %*{"name": "Grace", "species": "dog"}
+          summary = "Create a dog",
+          value = CreatePetBody(name: "Grace", species: "dog", age: none(int)),
         ),
       }
     ),
@@ -217,19 +218,19 @@ when isMainModule:
         examples = {
           "cat": apiExample(
             summary = "Create a cat",
-            value =
-              %*{
-                "id": 100,
-                "name": "Ada",
-                "species": "cat",
-                "status": "petAvailable",
-                "age": 4,
-              },
+            value = Pet(
+              id: 100, name: "Ada", species: "cat", status: petAvailable, age: some(4)
+            ),
           ),
           "dog": apiExample(
             summary = "Create a dog",
-            value =
-              %*{"id": 100, "name": "Grace", "species": "dog", "status": "petAvailable"},
+            value = Pet(
+              id: 100,
+              name: "Grace",
+              species: "dog",
+              status: petAvailable,
+              age: none(int),
+            ),
           ),
         },
       )
