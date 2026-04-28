@@ -121,6 +121,12 @@ proc updateItem(
     notify: Option[bool],
 ): ItemOut {.tapi(put, "/items/@id", summary = "Update item").} =
   ItemOut(id: id, name: body.name, count: body.count)
+
+proc createItem(
+    body: Body[CreateItemBody],
+    dryRun: Option[bool],
+): ItemOut {.tapi(post, "/items", summary = "Create item").} =
+  ItemOut(id: 0, name: body.name, count: body.count)
 ```
 
 Use `ApiRequest[Params, Body]` when grouped path/query parameters are clearer:
@@ -133,6 +139,31 @@ proc updateItem(
     input: ApiRequest[ItemPath, CreateItemBody]
 ): ItemOut {.tapi(put, "/items/@id", summary = "Update item").} =
   ItemOut(id: input.params.id, name: input.body.name, count: input.body.count)
+```
+
+TAPIS routes and regular Mummy handlers can use the same router. Register raw
+Mummy handlers on `api.router` when you need lower-level control or an endpoint
+that should not participate in TAPIS encoding and OpenAPI metadata:
+
+```nim
+import mummy
+import mummy/routers
+import sarcophagus/tapis
+
+proc status(request: Request) {.gcsafe.} =
+  var headers: mummy.HttpHeaders
+  headers["Content-Type"] = "application/json; charset=utf-8"
+  request.respond(200, headers, """{"status":"ok"}""")
+
+proc readItem(id: int): ItemOut {.gcsafe.} =
+  ItemOut(id: id, name: "item-" & $id)
+
+let api = initApiRouter("Mixed API", "1.0.0")
+api.router.get("/status", status)
+api.get("/items/@id", readItem, summary = "Read item")
+api.mountOpenApi()
+
+newServer(api.router).serve(Port(8080), address = "127.0.0.1")
 ```
 
 By default, TAPIS supports JSON. Compile with `-d:feature.sarcophagus.cbor` or
