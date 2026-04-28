@@ -63,7 +63,9 @@ proc cookieValue*(headers: ApiHeaders, name: string): string =
     if pieces.len == 2 and pieces[0] == name:
       return pieces[1]
 
-proc toOAuth2TokenPayload(response: OAuth2TokenResponse): OAuth2TokenPayload =
+proc to*(
+    response: OAuth2TokenResponse, tp: typedesc[OAuth2TokenPayload]
+): OAuth2TokenPayload =
   OAuth2TokenPayload(
     access_token: response.accessToken,
     token_type: response.tokenType,
@@ -71,7 +73,9 @@ proc toOAuth2TokenPayload(response: OAuth2TokenResponse): OAuth2TokenPayload =
     scope: response.scope,
   )
 
-proc toOAuth2FailurePayload(failure: OAuth2Failure): OAuth2FailurePayload =
+proc to*(
+    failure: OAuth2Failure, tp: typedesc[OAuth2FailurePayload]
+): OAuth2FailurePayload =
   OAuth2FailurePayload(
     error: failure.error,
     error_description: failure.errorDescription,
@@ -83,7 +87,7 @@ proc oauth2ErrorResponse*(
 ): OAuth2ApiError =
   ## Builds a typed OAuth2 error response.
   apiResponse(
-    OAuth2ErrorResponse(status: "error", error: failure.toOAuth2FailurePayload()),
+    OAuth2ErrorResponse(status: "error", error: failure.to(OAuth2FailurePayload)),
     statusCode,
     headers.mummyToApiHeaders(),
   )
@@ -167,7 +171,7 @@ proc oauth2TokenHandler*(
     let tokenResponse = tokenResult.response
     request.respondTypedApiValue(
       apiResponse(
-        tokenResponse.toOAuth2TokenPayload(), 200, headers.mummyToApiHeaders()
+        tokenResponse.to(OAuth2TokenPayload), 200, headers.mummyToApiHeaders()
       )
     )
 
@@ -200,7 +204,7 @@ proc oauth2TokenHandler*(
     let tokenResponse = tokenResult.response
     request.respondTypedApiValue(
       apiResponse(
-        tokenResponse.toOAuth2TokenPayload(), 200, headers.mummyToApiHeaders()
+        tokenResponse.to(OAuth2TokenPayload), 200, headers.mummyToApiHeaders()
       )
     )
 
