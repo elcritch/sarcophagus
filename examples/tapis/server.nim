@@ -79,7 +79,52 @@ proc getPetFlat(id: int, includeSold: Option[bool]): Pet {.gcsafe.} =
 
   raiseApiError(404, "pet not found", "pet_not_found", details = %*{"id": id})
 
-proc createPet(body: CreatePetBody): ApiResponse[Pet] {.gcsafe.} =
+proc createPet(
+    body: CreatePetBody
+): ApiResponse[Pet] {.
+    tapi(
+      post,
+      "/pets",
+      summary = "Create a pet",
+      tags = ["pets"],
+      responseStatus = 201,
+      request = apiRequestDoc(
+        examples = {
+          "cat": apiExample(
+            summary = "Create a cat",
+            value = CreatePetBody(name: "Ada", species: "cat", age: some(4)),
+          ),
+          "dog": apiExample(
+            summary = "Create a dog",
+            value = CreatePetBody(name: "Grace", species: "dog", age: none(int)),
+          ),
+        }
+      ),
+      responses = {
+        201: apiResponseDoc(
+          description = "Pet created",
+          examples = {
+            "cat": apiExample(
+              summary = "Create a cat",
+              value = Pet(
+                id: 100, name: "Ada", species: "cat", status: petAvailable, age: some(4)
+              ),
+            ),
+            "dog": apiExample(
+              summary = "Create a dog",
+              value = Pet(
+                id: 100,
+                name: "Grace",
+                species: "dog",
+                status: petAvailable,
+                age: none(int),
+              ),
+            ),
+          },
+        )
+      },
+    )
+.} =
   var headers: HttpHeaders
   headers["Location"] = "/pets/100"
   apiResponse(
@@ -101,6 +146,18 @@ proc updatePet(input: ApiRequest[PetPath, CreatePetBody]): Pet {.gcsafe.} =
     species: input.body.species,
     status: petPending,
     age: input.body.age,
+  )
+
+proc createPetDirect(body: CreatePetBody): ApiResponse[Pet] {.gcsafe.} =
+  apiResponse(
+    Pet(
+      id: 101,
+      name: body.name,
+      species: body.species,
+      status: petAvailable,
+      age: body.age,
+    ),
+    statusCode = 201,
   )
 
 proc deletePet(params: Params[PetPath]): MessageResponse {.gcsafe.} =
@@ -194,10 +251,11 @@ when isMainModule:
     summary = "Get a pet with flat params",
     tags = ["pets"],
   )
+  apiRouter.add(createPet)
   apiRouter.post(
-    "/pets",
-    createPet,
-    summary = "Create a pet",
+    "/direct-pets",
+    createPetDirect,
+    summary = "Create a pet with direct docs",
     tags = ["pets"],
     responseStatus = 201,
     request = apiRequestDoc(
@@ -205,11 +263,7 @@ when isMainModule:
         "cat": apiExample(
           summary = "Create a cat",
           value = CreatePetBody(name: "Ada", species: "cat", age: some(4)),
-        ),
-        "dog": apiExample(
-          summary = "Create a dog",
-          value = CreatePetBody(name: "Grace", species: "dog", age: none(int)),
-        ),
+        )
       }
     ),
     responses = {
@@ -217,21 +271,11 @@ when isMainModule:
         description = "Pet created",
         examples = {
           "cat": apiExample(
-            summary = "Create a cat",
+            summary = "Created cat",
             value = Pet(
-              id: 100, name: "Ada", species: "cat", status: petAvailable, age: some(4)
+              id: 101, name: "Ada", species: "cat", status: petAvailable, age: some(4)
             ),
-          ),
-          "dog": apiExample(
-            summary = "Create a dog",
-            value = Pet(
-              id: 100,
-              name: "Grace",
-              species: "dog",
-              status: petAvailable,
-              age: none(int),
-            ),
-          ),
+          )
         },
       )
     },

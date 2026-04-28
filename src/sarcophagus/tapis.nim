@@ -33,6 +33,8 @@ template tapi*(
   operationId: static string = "",
   tags: static openArray[string] = [],
   responseStatus: static int = 200,
+  request: untyped = apiRequestDoc(),
+  responses: untyped = [],
 ) {.pragma.}
   ## Pragma for annotating procs that can be registered with `api.add`.
   ##
@@ -911,6 +913,23 @@ proc staticTagsArg(node: NimNode): NimNode =
   else:
     result = node.copyNimTree()
 
+proc isDefaultRequestArg(node: NimNode): bool =
+  if node.kind != nnkCall or node.len == 0 or node[0].kind notin {nnkIdent, nnkSym} or
+      $node[0] != "apiRequestDoc":
+    return false
+  if node.len == 1:
+    return true
+  if node.len >= 4 and node[2].kind == nnkNilLit:
+    let examples = node[3]
+    if examples.kind == nnkBracket and examples.len == 0:
+      return true
+    if examples.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and examples.len > 0 and
+        examples[^1].kind == nnkBracket and examples[^1].len == 0:
+      return true
+
+proc isDefaultResponsesArg(node: NimNode): bool =
+  node.kind == nnkBracket and node.len == 0
+
 macro add*(
     api: typed,
     handler: typed,
@@ -942,6 +961,18 @@ macro add*(
   let operationId = staticStringArg(tapiArg(pragma, 5, newLit("")))
   let tags = staticTagsArg(tapiArg(pragma, 6, newTree(nnkBracket)))
   let responseStatus = staticIntArg(tapiArg(pragma, 7, newLit(200)))
+  let pragmaRequest = tapiArg(pragma, 8, newCall(bindSym"apiRequestDoc"))
+  let pragmaResponses = tapiArg(pragma, 9, newTree(nnkBracket))
+  let requestArg =
+    if request.isDefaultRequestArg():
+      pragmaRequest
+    else:
+      request.copyNimTree()
+  let responsesArg =
+    if responses.isDefaultResponsesArg():
+      pragmaResponses
+    else:
+      responses.copyNimTree()
   let handlerTarget =
     case handler.kind
     of nnkIdent, nnkSym:
@@ -958,8 +989,8 @@ macro add*(
     operationId,
     tags,
     responseStatus,
-    newTree(nnkExprEqExpr, ident"request", request),
-    newTree(nnkExprEqExpr, ident"responses", responses),
+    newTree(nnkExprEqExpr, ident"request", requestArg),
+    newTree(nnkExprEqExpr, ident"responses", responsesArg),
     newTree(nnkExprEqExpr, ident"security", security),
   )
 

@@ -91,6 +91,36 @@ proc createAddedItem(
 ): ItemOut {.tapi(post, "/added-items", summary = "Create added item").} =
   ItemOut(id: 77, name: body.name, count: body.count, verbose: false, mode: "")
 
+proc createPragmaDocumentedItem(
+    body: ItemBody
+): ItemOut {.
+    tapi(
+      post,
+      "/pragma-doc-items",
+      summary = "Create pragma documented item",
+      request = apiRequestDoc(
+        examples = {
+          "pragma-request": apiExample(
+            summary = "Pragma request", value = ItemBody(name: "pragma", count: 9)
+          )
+        }
+      ),
+      responses = {
+        200: apiResponseDoc(
+          description = "Pragma response",
+          examples = {
+            "pragma-response": apiExample(
+              summary = "Pragma response",
+              value =
+                ItemOut(id: 88, name: "pragma", count: 9, verbose: false, mode: ""),
+            )
+          },
+        )
+      },
+    )
+.} =
+  ItemOut(id: 88, name: body.name, count: body.count, verbose: false, mode: "")
+
 proc getNamedTupleItem(
     params: Params[tuple[id: int, verbose: Option[bool]]]
 ): ItemOut {.gcsafe.} =
@@ -192,6 +222,7 @@ proc buildApi(includeStackTraces = false): ApiRouter =
       }
     ),
   )
+  api.add(createPragmaDocumentedItem)
   api.post(
     "/items",
     createItem,
@@ -564,6 +595,16 @@ suite "typed mummy tapis":
       check addedOperation["requestBody"]["content"]["application/json"]["examples"][
         "added"
       ]["value"]["count"].getInt() == 7
+
+      let pragmaOperation = spec["paths"]["/pragma-doc-items"]["post"]
+      check pragmaOperation["requestBody"]["content"]["application/json"]["examples"][
+        "pragma-request"
+      ]["value"]["name"].getStr() == "pragma"
+      check pragmaOperation["responses"]["200"]["description"].getStr() ==
+        "Pragma response"
+      check pragmaOperation["responses"]["200"]["content"]["application/json"][
+        "examples"
+      ]["pragma-response"]["value"]["id"].getInt() == 88
 
       let bulkOperation = spec["paths"]["/bulk-items/{id}"]["post"]
       check bulkOperation["parameters"][0]["name"].getStr() == "id"
