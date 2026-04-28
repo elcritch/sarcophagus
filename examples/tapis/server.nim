@@ -35,6 +35,9 @@ type
   PetPath = object
     id*: int
 
+  DocsPath = object
+    endpoint*: string
+
   CreatePetBody = object
     name*: string
     species*: string
@@ -106,25 +109,59 @@ proc deletePet(params: Params[PetPath]): MessageResponse {.gcsafe.} =
 proc brokenRoute(): MessageResponse {.gcsafe.} =
   raise newException(ValueError, "simulated validation failure")
 
-proc swaggerUi(): RawResponse["text/html"] {.gcsafe.} =
-  htmlResponse(dedent"""
+proc swaggerUiHtml(endpoint: string): RawResponse["text/html"] {.gcsafe.} =
+  let endpointJson = $(%endpoint)
+  htmlResponse(
+    dedent"""
       <!DOCTYPE html>
       <html>
       <head>
         <meta charset="utf-8">
         <title>StockHub API Docs</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          .selected-endpoint {
+            outline: 2px solid #2f80ed;
+            outline-offset: 4px;
+          }
+        </style>
       </head>
       <body>
         <div id="redoc"></div>
         <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
         <script>
-          Redoc.init(window.location.origin + '/swagger.json', {}, document.getElementById('redoc'));
+          const selectedEndpoint = __ENDPOINT__;
+          Redoc.init(window.location.origin + '/swagger.json', {}, document.getElementById('redoc'), function() {
+            if (!selectedEndpoint) {
+              return;
+            }
+
+            const endpoint = decodeURIComponent(selectedEndpoint);
+            const pathLabel = endpoint.startsWith('/') ? endpoint : '/' + endpoint;
+            const section = Array.from(document.querySelectorAll('[data-section-id], [id]')).find(function(node) {
+              return node.textContent && node.textContent.indexOf(pathLabel) >= 0;
+            });
+
+            if (section) {
+              section.classList.add('selected-endpoint');
+              section.scrollIntoView({block: 'center'});
+            }
+          });
         </script>
       </body>
       </html>
-    """
+    """.replace(
+      "__ENDPOINT__", endpointJson
+    )
   )
+
+proc swaggerUi(): RawResponse["text/html"] {.gcsafe.} =
+  swaggerUiHtml("")
+
+proc swaggerUiForEndpoint(
+    params: Params[DocsPath]
+): RawResponse["text/html"] {.gcsafe.} =
+  swaggerUiHtml(params.endpoint)
 
 proc parsePort(): Port =
   let rawPort =
@@ -166,6 +203,12 @@ when isMainModule:
     "/broken", brokenRoute, summary = "Example error response", tags = ["system"]
   )
   apiRouter.get("/docs", swaggerUi, summary = "Swagger docs", tags = ["system"])
+  apiRouter.get(
+    "/docs/@endpoint",
+    swaggerUiForEndpoint,
+    summary = "Swagger docs for endpoint",
+    tags = ["system"],
+  )
   apiRouter.mountOpenApi()
 
   let server = newServer(apiRouter.router, workerThreads = 1)
