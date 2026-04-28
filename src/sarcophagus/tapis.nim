@@ -828,6 +828,7 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       operationId: string = "",
       tags: openArray[string] = [],
       responseStatus: int = 200,
+      responses: openArray[(int, ApiResponseDoc)] = [],
       security: ApiSecurity = noSecurity(),
   ): untyped =
     ## Registers a typed TAPIS route for this HTTP method.
@@ -837,7 +838,9 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       path,
       handler,
       source,
-      endpointMeta(summary, description, operationId, tags, responseStatus, security),
+      endpointMeta(
+        summary, description, operationId, tags, responseStatus, responses, security
+      ),
     )
 
 defineApiMethod(get, "GET", adsParams)
@@ -906,7 +909,9 @@ proc staticTagsArg(node: NimNode): NimNode =
   else:
     result = node.copyNimTree()
 
-macro add*(api: typed, handler: typed, security: typed = noSecurity()): untyped =
+macro add*(
+    api: typed, handler: typed, responses: typed = [], security: typed = noSecurity()
+): untyped =
   ## Registers a proc annotated with the `tapi` pragma.
   ##
   ## Route metadata is read from the pragma, while `security` may be supplied at
@@ -947,6 +952,7 @@ macro add*(api: typed, handler: typed, security: typed = noSecurity()): untyped 
     operationId,
     tags,
     responseStatus,
+    responses,
     security,
   )
 
@@ -959,6 +965,7 @@ template options*(
     operationId = "",
     tags: openArray[string] = [],
     responseStatus = 200,
+    responses: openArray[(int, ApiResponseDoc)] = [],
     security: ApiSecurity = noSecurity(),
 ): untyped =
   ## Registers an `OPTIONS` TAPIS route.
@@ -968,7 +975,9 @@ template options*(
     path,
     handler,
     adsNone,
-    endpointMeta(summary, description, operationId, tags, responseStatus, security),
+    endpointMeta(
+      summary, description, operationId, tags, responseStatus, responses, security
+    ),
   )
 
 proc openApiJson*(api: ApiRouter): JsonNode =

@@ -195,7 +195,34 @@ when isMainModule:
     tags = ["pets"],
   )
   apiRouter.post(
-    "/pets", createPet, summary = "Create a pet", tags = ["pets"], responseStatus = 201
+    "/pets",
+    createPet,
+    summary = "Create a pet",
+    tags = ["pets"],
+    responseStatus = 201,
+    responses = {
+      201: apiResponseDoc(
+        description = "Pet created",
+        examples = {
+          "cat": apiExample(
+            summary = "Create a cat",
+            value =
+              %*{
+                "id": 100,
+                "name": "Ada",
+                "species": "cat",
+                "status": "petAvailable",
+                "age": 4,
+              },
+          ),
+          "dog": apiExample(
+            summary = "Create a dog",
+            value =
+              %*{"id": 100, "name": "Grace", "species": "dog", "status": "petAvailable"},
+          ),
+        },
+      )
+    },
   )
   apiRouter.put("/pets/@id", updatePet, summary = "Update a pet", tags = ["pets"])
   apiRouter.delete("/pets/@id", deletePet, summary = "Delete a pet", tags = ["pets"])

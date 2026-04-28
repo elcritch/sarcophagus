@@ -160,10 +160,47 @@ proc buildApi(includeStackTraces = false): ApiRouter =
   let api = initApiRouter("Typed Test API", "1.2.3", config)
   api.router.get("/raw-status", rawMummyStatus)
   api.get("/items/@id", getItem, summary = "Get item", tags = ["items"])
-  api.add(readItem)
+  api.add(
+    readItem,
+    responses = {
+      200: apiResponseDoc(
+        description = "Read item response",
+        examples = {
+          "read": apiExample(
+            summary = "Read item",
+            value =
+              %*{
+                "id": 8,
+                "name": "read-8",
+                "count": 1,
+                "verbose": true,
+                "mode": "modeSlow",
+              },
+          )
+        },
+      )
+    },
+  )
   api.get("/flat-items/@id", getFlatItem, summary = "Get flat item")
   api.add(readFlatItem)
-  api.post("/items", createItem, summary = "Create item", responseStatus = 201)
+  api.post(
+    "/items",
+    createItem,
+    summary = "Create item",
+    responseStatus = 201,
+    responses = {
+      201: apiResponseDoc(
+        description = "Created item response",
+        examples = {
+          "created": apiExample(
+            summary = "Created item",
+            value =
+              %*{"id": 42, "name": "probe", "count": 3, "verbose": false, "mode": ""},
+          )
+        },
+      )
+    },
+  )
   api.post("/bulk-items/@id", createBulkItem, summary = "Create bulk item")
   api.post("/queried-items", createQueriedItem, summary = "Create queried item")
   api.put("/items/@id", upsertItem, summary = "Upsert item")
@@ -476,6 +513,19 @@ suite "typed mummy tapis":
       let postOperation = spec["paths"]["/items"]["post"]
       check postOperation["requestBody"]["required"].getBool() == true
       check postOperation["responses"].hasKey("201")
+      let createdResponse = postOperation["responses"]["201"]
+      check createdResponse["description"].getStr() == "Created item response"
+      check createdResponse["content"]["application/json"].hasKey("schema")
+      check createdResponse["content"]["application/json"]["examples"]["created"][
+        "summary"
+      ].getStr() == "Created item"
+
+      let readOperation = spec["paths"]["/read-items/{id}"]["get"]
+      let readResponse = readOperation["responses"]["200"]
+      check readResponse["description"].getStr() == "Read item response"
+      check readResponse["content"]["application/json"]["examples"]["read"]["value"][
+        "name"
+      ].getStr() == "read-8"
 
       let bulkOperation = spec["paths"]["/bulk-items/{id}"]["post"]
       check bulkOperation["parameters"][0]["name"].getStr() == "id"

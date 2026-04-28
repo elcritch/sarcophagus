@@ -3,13 +3,50 @@ import std/[json, options, strutils]
 import ./tapis_security
 import ./typed_api
 
-type EndpointMeta* = object
-  summary*: string
-  description*: string
-  operationId*: string
-  tags*: seq[string]
-  responseStatus*: int
-  security*: ApiSecurity
+type
+  ApiExample* = object
+    summary*: string
+    description*: string
+    value*: JsonNode
+    externalValue*: string
+
+  ApiResponseDoc* = object
+    description*: string
+    contentType*: string
+    example*: JsonNode
+    examples*: seq[(string, ApiExample)]
+
+  EndpointMeta* = object
+    summary*: string
+    description*: string
+    operationId*: string
+    tags*: seq[string]
+    responseStatus*: int
+    responses*: seq[(int, ApiResponseDoc)]
+    security*: ApiSecurity
+
+proc apiExample*(
+    summary = "", description = "", value: JsonNode = nil, externalValue = ""
+): ApiExample =
+  ApiExample(
+    summary: summary,
+    description: description,
+    value: value,
+    externalValue: externalValue,
+  )
+
+proc apiResponseDoc*(
+    description = "",
+    contentType = "application/json",
+    example: JsonNode = nil,
+    examples: openArray[(string, ApiExample)] = [],
+): ApiResponseDoc =
+  ApiResponseDoc(
+    description: description,
+    contentType: contentType,
+    example: example,
+    examples: @examples,
+  )
 
 proc endpointMeta*(
     summary = "",
@@ -17,6 +54,7 @@ proc endpointMeta*(
     operationId = "",
     tags: openArray[string] = [],
     responseStatus = 200,
+    responses: openArray[(int, ApiResponseDoc)] = [],
     security = noSecurity(),
 ): EndpointMeta =
   EndpointMeta(
@@ -25,6 +63,7 @@ proc endpointMeta*(
     operationId: operationId,
     tags: @tags,
     responseStatus: responseStatus,
+    responses: @responses,
     security: security,
   )
 
@@ -222,6 +261,47 @@ proc responseContentSchema*[contentType: static string](
   result = newJObject()
   result[contentType] = %*{"schema": responseOpenApiSchema(RawResponse[contentType])}
 
+proc apiExampleJson(example: ApiExample): JsonNode =
+  result = newJObject()
+  if example.summary.len > 0:
+    result["summary"] = %example.summary
+  if example.description.len > 0:
+    result["description"] = %example.description
+  if example.value != nil:
+    result["value"] = example.value
+  if example.externalValue.len > 0:
+    result["externalValue"] = %example.externalValue
+
+proc applyResponseDoc(response: JsonNode, doc: ApiResponseDoc) =
+  if doc.description.len > 0:
+    response["description"] = %doc.description
+
+  if doc.example == nil and doc.examples.len == 0:
+    return
+
+  if "content" notin response:
+    response["content"] = newJObject()
+  if doc.contentType notin response["content"]:
+    response["content"][doc.contentType] = newJObject()
+
+  let mediaType = response["content"][doc.contentType]
+  if doc.example != nil:
+    mediaType["example"] = doc.example
+  if doc.examples.len > 0:
+    var examples = newJObject()
+    for (name, example) in doc.examples:
+      examples[name] = apiExampleJson(example)
+    mediaType["examples"] = examples
+
+proc applyResponseDocs(responses: JsonNode, docs: openArray[(int, ApiResponseDoc)]) =
+  for (statusCode, doc) in docs:
+    let key = $statusCode
+    if key notin responses:
+      responses[key] = newJObject()
+      responses[key]["description"] =
+        %(if doc.description.len > 0: doc.description else: "Additional response")
+    applyResponseDoc(responses[key], doc)
+
 proc endpointOperation*[In, Out](
     httpMethod, path: string,
     source: ApiDecodeSource,
@@ -260,6 +340,7 @@ proc endpointOperation*[In, Out](
       "400": {"description": "Invalid request"},
       "500": {"description": "Internal server error"},
     }
+  result["responses"].applyResponseDocs(meta.responses)
 
 proc endpointOperationWithParams*[Out](
     httpMethod, path: string,
@@ -291,6 +372,7 @@ proc endpointOperationWithParams*[Out](
       "400": {"description": "Invalid request"},
       "500": {"description": "Internal server error"},
     }
+  result["responses"].applyResponseDocs(meta.responses)
 
 proc endpointOperationWithParamsAndBody*[Body, Out](
     httpMethod, path: string,
