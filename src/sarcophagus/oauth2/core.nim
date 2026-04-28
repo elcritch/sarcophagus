@@ -1,8 +1,9 @@
-import std/[base64, json, options, strutils, sysrand, tables]
+import std/[base64, json, options, strutils, tables]
 
 import bearssl/hash
 
-import ./jwt_bearer_tokens
+import ../core/jwt_bearer_tokens
+import ./utils
 
 type
   OAuth2ClientAuthMethod* = enum
@@ -97,71 +98,12 @@ proc constantTimeEquals(lhs: string, rhs: string): bool =
     diff = diff or (ord(lhs[idx]) xor ord(rhs[idx]))
   diff == 0
 
-proc bytesToString(bytes: openArray[byte]): string =
-  result = newString(bytes.len)
-  for idx, value in bytes:
-    result[idx] = char(value)
-
-proc base64UrlEncodeBytes(bytes: openArray[byte]): string =
-  result = encode(bytes.bytesToString())
-  result = result.replace('+', '-')
-  result = result.replace('/', '_')
-  result = result.replace("=", "")
-
 proc sha256Bytes(value: string): array[sha256SIZE, byte] =
   var context: Sha256Context
   sha256Init(context)
   if value.len > 0:
     sha256Update(context, cast[pointer](unsafeAddr value[0]), csize_t(value.len))
   sha256Out(context, addr result[0])
-
-proc randomUrlSafeSecret(byteCount: int): string =
-  if byteCount <= 0:
-    raise newException(ValueError, "random byte count must be positive")
-
-  var bytes = newSeq[byte](byteCount)
-  if not urandom(bytes):
-    raise newException(OSError, "failed to generate secure random bytes")
-  base64UrlEncodeBytes(bytes)
-
-proc decodeHexNibble(c: char): int =
-  case c
-  of '0' .. '9':
-    ord(c) - ord('0')
-  of 'a' .. 'f':
-    10 + ord(c) - ord('a')
-  of 'A' .. 'F':
-    10 + ord(c) - ord('A')
-  else:
-    -1
-
-proc decodeFormComponent(input: string): string =
-  result = newStringOfCap(input.len)
-  var idx = 0
-  while idx < input.len:
-    case input[idx]
-    of '+':
-      result.add(' ')
-    of '%':
-      if idx + 2 >= input.len:
-        raise newException(ValueError, "invalid percent encoding")
-      let hi = decodeHexNibble(input[idx + 1])
-      let lo = decodeHexNibble(input[idx + 2])
-      if hi < 0 or lo < 0:
-        raise newException(ValueError, "invalid percent encoding")
-      result.add(char((hi shl 4) or lo))
-      idx += 2
-    else:
-      result.add(input[idx])
-    inc idx
-
-proc sanitizeHeaderValue(input: string): string =
-  for ch in input:
-    if ch == '"' or ch == '\\':
-      result.add('\\')
-      result.add(ch)
-    elif ch >= ' ' and ch <= '~':
-      result.add(ch)
 
 proc parseAuthorizationHeader(header: string): ParsedAuthorizationHeader =
   let trimmed = header.strip()

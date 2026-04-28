@@ -4,9 +4,10 @@ import mummy
 import mummy/routers
 
 import ./core/[swagger, typed_api]
-from ./core/oauth2 import
+from ./oauth2/core import
   OAuth2AuthorizationCodeConsumer, OAuth2AuthorizationCodeSaver, OAuth2Config
-from ./oauth2 import OAuth2CurrentUserLoader, oauth2AuthorizeHandler, oauth2TokenHandler
+from ./oauth2/common import OAuth2CurrentUserLoader
+from ./oauth2/mummy_support import oauth2AuthorizeHandler, oauth2TokenHandler
 import ./tapis_utils
 import ./tapis_security
 

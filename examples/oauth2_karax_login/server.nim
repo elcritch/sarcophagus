@@ -3,7 +3,7 @@ import std/[json, options, os, strutils]
 import mummy
 import mummy/routers
 
-import sarcophagus/[core/jwt_bearer_tokens, core/oauth2, oauth2]
+import sarcophagus/[core/jwt_bearer_tokens, oauth2/core, oauth2]
 
 type CurrentUser = object
   subject: string

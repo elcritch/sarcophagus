@@ -4,8 +4,9 @@
 ## routing, and security utilities.
 
 import ./sarcophagus/[bearer_auth, oauth2, tapis, tapis_utils]
-import ./sarcophagus/security/[oauth2_hashed_clients, password_login, secret_hashing]
+import ./sarcophagus/oauth2/hashed_clients
+import ./sarcophagus/security/[password_login, secret_hashing]
 
 export
-  bearer_auth, oauth2, oauth2_hashed_clients, password_login, secret_hashing, tapis,
+  bearer_auth, hashed_clients, oauth2, password_login, secret_hashing, tapis,
   tapis_utils

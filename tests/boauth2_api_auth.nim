@@ -7,9 +7,7 @@ import
 import mummy
 import mummy/routers
 
-import
-  sarcophagus/
-    [core/jwt_bearer_tokens, core/oauth2, oauth2, security/oauth2_hashed_clients]
+import sarcophagus/[core/jwt_bearer_tokens, oauth2/core, oauth2, oauth2/hashed_clients]
 
 type ServerThreadArgs = object
   server: Server
