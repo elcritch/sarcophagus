@@ -10,8 +10,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: jiro4989/setup-nim-action@v2
+      - run: nimble install "https://github.com/nim-lang/atlas@#head"
+      - uses: actions/checkout@v4
         with:
           nim-version: '2.2.10'
       - name: Cache atlas deps
@@ -22,7 +23,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-atlas-
       - run: echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
-      - run: nimble install "https://github.com/nim-lang/atlas@#head"
       - run: atlas -v
       - run: atlas init
       - run: atlas install --feature:cbor --feature:jsony
