@@ -11,10 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: jiro4989/setup-nim-action@v2
-      - run: nimble install "https://github.com/nim-lang/atlas@#head"
-      - uses: actions/checkout@v4
         with:
           nim-version: '2.2.10'
+      - run: nimble install "https://github.com/nim-lang/atlas@#head"
+      - uses: actions/checkout@v4
       - name: Cache atlas deps
         uses: actions/cache@v4
         with:
