@@ -1,10 +1,14 @@
-import std/[json, macros, options, strutils]
+import std/[macros, options, strutils]
 
 import mummy
 import mummy/routers
 
 import ./core/jwt_bearer_tokens
 import ./core/oauth2
+import ./core/typed_api
+import ./tapis_utils
+
+export tapis_utils
 
 type OAuth2ProtectedRequestHandler* =
   proc(request: Request, claims: BearerTokenClaims) {.gcsafe.}
@@ -17,42 +21,95 @@ type
     displayName*: string
     scopes*: seq[string]
 
-  OAuth2CurrentUserLoader* = proc(request: Request): Option[OAuth2User] {.gcsafe.}
+  OAuth2CurrentUserLoader* = proc(headers: ApiHeaders): Option[OAuth2User] {.gcsafe.}
     ## Callback used by `/oauth/authorize` to read the current logged-in user.
+
+  OAuth2TokenPayload* = object ## HTTP JSON body returned by OAuth2 token endpoints.
+    access_token*: string
+    token_type*: string
+    expires_in*: int
+    scope*: string
+
+  OAuth2FailurePayload* = object ## OAuth2 error details serialized in error responses.
+    error*: string
+    error_description*: string
+    error_uri*: string
+
+  OAuth2ErrorResponse* = object ## JSON returned by OAuth2 error responses.
+    status*: string
+    error*: OAuth2FailurePayload
+
+  OAuth2ApiError* = ApiResponse[OAuth2ErrorResponse]
+
+  OAuth2ErrorResponder* = proc(failure: OAuth2Failure): OAuth2ApiError {.gcsafe.}
+    ## Callback used to build OAuth2 error responses.
 
 const routeRegistrationNames =
   ["addRoute", "get", "head", "post", "put", "delete", "options", "patch"]
 
-proc respondJson(
-    request: Request, statusCode: int, body: string, headers: HttpHeaders
-) =
-  var responseHeaders = headers
-  responseHeaders["Content-Type"] = "application/json; charset=utf-8"
+proc valueFor(values: ApiHeaders, name: string, caseInsensitive = false): string =
+  for value in values:
+    if value.name == name or (caseInsensitive and cmpIgnoreCase(value.name, name) == 0):
+      return value.value
 
-  if request.httpMethod == "HEAD":
-    responseHeaders["Content-Length"] = $body.len
-    request.respond(statusCode, responseHeaders)
-  else:
-    request.respond(statusCode, responseHeaders, body)
+proc headerValue*(headers: ApiHeaders, name: string): string =
+  ## Returns one header value from typed API headers.
+  headers.valueFor(name, caseInsensitive = true)
 
-proc defaultOAuth2ErrorResponder*(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-  ## Writes the default JSON response for OAuth2 resource-server failures.
+proc cookieValue*(headers: ApiHeaders, name: string): string =
+  ## Returns one Cookie header value from typed API headers.
+  for part in headers.headerValue("Cookie").split(';'):
+    let pieces = part.strip().split('=', maxsplit = 1)
+    if pieces.len == 2 and pieces[0] == name:
+      return pieces[1]
+
+proc to*(
+    response: OAuth2TokenResponse, tp: typedesc[OAuth2TokenPayload]
+): OAuth2TokenPayload =
+  OAuth2TokenPayload(
+    access_token: response.accessToken,
+    token_type: response.tokenType,
+    expires_in: response.expiresIn,
+    scope: response.scope,
+  )
+
+proc to*(
+    failure: OAuth2Failure, tp: typedesc[OAuth2FailurePayload]
+): OAuth2FailurePayload =
+  OAuth2FailurePayload(
+    error: failure.error,
+    error_description: failure.errorDescription,
+    error_uri: failure.errorUri,
+  )
+
+proc oauth2ErrorResponse*(
+    statusCode: int, failure: OAuth2Failure, headers: HttpHeaders = default(HttpHeaders)
+): OAuth2ApiError =
+  ## Builds a typed OAuth2 error response.
+  apiResponse(
+    OAuth2ErrorResponse(status: "error", error: failure.to(OAuth2FailurePayload)),
+    statusCode,
+    headers.mummyToApiHeaders(),
+  )
+
+proc oauth2MethodNotAllowedResponse(allow: string): OAuth2ApiError =
+  var headers: HttpHeaders
+  headers["Allow"] = allow
+  oauth2ErrorResponse(
+    405, OAuth2Failure(statusCode: 405, error: "invalid_request"), headers
+  )
+
+proc defaultOAuth2ErrorResponder*(failure: OAuth2Failure): OAuth2ApiError {.gcsafe.} =
+  ## Builds the default JSON response for OAuth2 resource-server failures.
   var headers: HttpHeaders
   if failure.wwwAuthenticate.len > 0:
     headers["WWW-Authenticate"] = failure.wwwAuthenticate
-
-  let body =
-    if failure.error.len == 0:
-      $(%*{"status": "error"})
-    else:
-      $(%*{"status": "error", "error": failure.toJson()})
-
-  request.respondJson(failure.statusCode, body, headers)
+  oauth2ErrorResponse(failure.statusCode, failure, headers)
 
 proc defaultOAuth2TokenErrorResponder*(
-    request: Request, failure: OAuth2Failure
-) {.gcsafe.} =
-  ## Writes the default JSON response for OAuth2 token endpoint failures.
+    failure: OAuth2Failure
+): OAuth2ApiError {.gcsafe.} =
+  ## Builds the default JSON response for OAuth2 token endpoint failures.
   ##
   ## The response includes `Cache-Control: no-store` and `Pragma: no-cache`.
   var headers: HttpHeaders
@@ -60,25 +117,13 @@ proc defaultOAuth2TokenErrorResponder*(
   headers["Pragma"] = "no-cache"
   if failure.wwwAuthenticate.len > 0:
     headers["WWW-Authenticate"] = failure.wwwAuthenticate
-
-  let body =
-    if failure.error.len == 0:
-      $(%*{"status": "error"})
-    else:
-      $(%*{"status": "error", "error": failure.toJson()})
-
-  request.respondJson(failure.statusCode, body, headers)
+  oauth2ErrorResponse(failure.statusCode, failure, headers)
 
 proc defaultOAuth2AuthorizeErrorResponder*(
-    request: Request, failure: OAuth2Failure
-) {.gcsafe.} =
-  ## Writes the default JSON response for OAuth2 authorization endpoint failures.
-  let body =
-    if failure.error.len == 0:
-      $(%*{"status": "error"})
-    else:
-      $(%*{"status": "error", "error": failure.toJson()})
-  request.respondJson(failure.statusCode, body, default(HttpHeaders))
+    failure: OAuth2Failure
+): OAuth2ApiError {.gcsafe.} =
+  ## Builds the default JSON response for OAuth2 authorization endpoint failures.
+  oauth2ErrorResponse(failure.statusCode, failure)
 
 proc appendQueryParam(url, key, value: string): string =
   result = url
@@ -97,21 +142,16 @@ proc redirect(request: Request, location: string, statusCode = 302) =
 
 proc oauth2TokenHandler*(
     config: OAuth2Config,
-    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-      defaultOAuth2TokenErrorResponder,
+    onError: OAuth2ErrorResponder = defaultOAuth2TokenErrorResponder,
 ): RequestHandler =
-  ## Returns a Mummy handler for the OAuth2 client-credentials token endpoint.
+  ## Returns a Mummy handler for the OAuth2 token endpoint.
   ##
   ## The handler delegates protocol validation to
   ## `core/oauth2.issueClientCredentialsToken` and supports HTTP Basic,
   ## form-body, and JSON-body client authentication.
   return proc(request: Request) {.gcsafe.} =
     if request.httpMethod != "POST":
-      var headers: HttpHeaders
-      headers["Allow"] = "POST"
-      request.respondJson(
-        405, $(%*{"status": "error", "error": {"error": "invalid_request"}}), headers
-      )
+      request.respondTypedApiValue(oauth2MethodNotAllowedResponse("POST"))
       return
 
     let tokenResult = issueClientCredentialsToken(
@@ -122,28 +162,28 @@ proc oauth2TokenHandler*(
     )
 
     if not tokenResult.ok:
-      onError(request, tokenResult.failure)
+      request.respondTypedApiValue(onError(tokenResult.failure))
       return
 
     var headers: HttpHeaders
     headers["Cache-Control"] = "no-store"
     headers["Pragma"] = "no-cache"
-    request.respondJson(200, $tokenResult.response.toJson(), headers)
+    let tokenResponse = tokenResult.response
+    request.respondTypedApiValue(
+      apiResponse(
+        tokenResponse.to(OAuth2TokenPayload), 200, headers.mummyToApiHeaders()
+      )
+    )
 
 proc oauth2TokenHandler*(
     config: OAuth2Config,
     consumeAuthorizationCode: OAuth2AuthorizationCodeConsumer,
-    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-      defaultOAuth2TokenErrorResponder,
+    onError: OAuth2ErrorResponder = defaultOAuth2TokenErrorResponder,
 ): RequestHandler =
   ## Returns a Mummy handler for client-credentials and authorization-code tokens.
   return proc(request: Request) {.gcsafe.} =
     if request.httpMethod != "POST":
-      var headers: HttpHeaders
-      headers["Allow"] = "POST"
-      request.respondJson(
-        405, $(%*{"status": "error", "error": {"error": "invalid_request"}}), headers
-      )
+      request.respondTypedApiValue(oauth2MethodNotAllowedResponse("POST"))
       return
 
     let tokenResult = issueOAuth2Token(
@@ -155,18 +195,23 @@ proc oauth2TokenHandler*(
     )
 
     if not tokenResult.ok:
-      onError(request, tokenResult.failure)
+      request.respondTypedApiValue(onError(tokenResult.failure))
       return
 
     var headers: HttpHeaders
     headers["Cache-Control"] = "no-store"
     headers["Pragma"] = "no-cache"
-    request.respondJson(200, $tokenResult.response.toJson(), headers)
+    let tokenResponse = tokenResult.response
+    request.respondTypedApiValue(
+      apiResponse(
+        tokenResponse.to(OAuth2TokenPayload), 200, headers.mummyToApiHeaders()
+      )
+    )
 
 proc registerOAuth2*(
     router: var Router, config: OAuth2Config, tokenPath = "/oauth/token"
 ) =
-  ## Mounts `oauth2TokenHandler(config)` on `router.post(tokenPath)`.
+  ## Mounts the OAuth2 token endpoint on a Mummy router.
   router.post(tokenPath, oauth2TokenHandler(config))
 
 proc oauth2AuthorizeHandler*(
@@ -174,36 +219,32 @@ proc oauth2AuthorizeHandler*(
     saveAuthorizationCode: OAuth2AuthorizationCodeSaver,
     currentUser: OAuth2CurrentUserLoader,
     loginUrl = "/login",
-    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-      defaultOAuth2AuthorizeErrorResponder,
+    onError: OAuth2ErrorResponder = defaultOAuth2AuthorizeErrorResponder,
 ): RequestHandler =
-  ## Returns a browser authorization endpoint for OAuth2 authorization-code login.
+  ## Returns a Mummy browser authorization endpoint.
   ##
   ## The handler expects an application-owned session callback. When no user is
   ## logged in, it redirects to `loginUrl` with a `next` parameter.
   return proc(request: Request) {.gcsafe.} =
     if request.httpMethod != "GET":
-      var headers: HttpHeaders
-      headers["Allow"] = "GET"
-      request.respondJson(
-        405, $(%*{"status": "error", "error": {"error": "invalid_request"}}), headers
-      )
+      request.respondTypedApiValue(oauth2MethodNotAllowedResponse("GET"))
       return
 
-    let user = currentUser(request)
+    let user = currentUser(request.headers.mummyToApiHeaders())
     if user.isNone:
       request.redirect(loginUrl.appendQueryParam("next", request.uri))
       return
 
     let responseType = request.queryParams["response_type"]
     if responseType != "code":
-      onError(
-        request,
-        OAuth2Failure(
-          statusCode: 400,
-          error: "unsupported_response_type",
-          errorDescription: "Only response_type=code is supported",
-        ),
+      request.respondTypedApiValue(
+        onError(
+          OAuth2Failure(
+            statusCode: 400,
+            error: "unsupported_response_type",
+            errorDescription: "Only response_type=code is supported",
+          )
+        )
       )
       return
 
@@ -220,7 +261,7 @@ proc oauth2AuthorizeHandler*(
     )
 
     if not authorizeResult.ok:
-      onError(request, authorizeResult.failure)
+      request.respondTypedApiValue(onError(authorizeResult.failure))
       return
 
     var location = authorizeResult.authorizationCode.redirectUri.appendQueryParam(
@@ -241,7 +282,7 @@ proc registerOAuth2AuthorizationCode*(
     authorizationPath = "/oauth/authorize",
     loginUrl = "/login",
 ) =
-  ## Mounts `/oauth/authorize` and an extended `/oauth/token` endpoint.
+  ## Mounts OAuth2 authorization-code endpoints on a Mummy router.
   ##
   ## Existing client-credentials requests continue to work on the token endpoint.
   router.get(
@@ -266,8 +307,7 @@ proc requireOAuth2BearerAuth*(
     request: Request,
     config: OAuth2Config,
     requiredScopes: openArray[string] = [],
-    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-      defaultOAuth2ErrorResponder,
+    onError: OAuth2ErrorResponder = defaultOAuth2ErrorResponder,
 ): bool {.gcsafe.} =
   ## Validates OAuth2 bearer auth and writes an error response on failure.
   ##
@@ -276,15 +316,14 @@ proc requireOAuth2BearerAuth*(
   if validation.ok:
     return true
 
-  onError(request, validation.failure)
+  request.respondTypedApiValue(onError(validation.failure))
   false
 
 proc requireOAuth2BearerAuth*(
     request: Request,
     config: OAuth2Config,
     requiredClaims: openArray[OAuth2ScopeClaim],
-    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-      defaultOAuth2ErrorResponder,
+    onError: OAuth2ErrorResponder = defaultOAuth2ErrorResponder,
 ): bool {.gcsafe.} =
   ## Validates OAuth2 bearer auth using structured scope-claim pairs.
   requireOAuth2BearerAuth(request, config, scopeClaimsToScopes(requiredClaims), onError)
@@ -293,8 +332,7 @@ proc oauth2*(
     wrapped: RequestHandler,
     config: OAuth2Config,
     requiredScopes: openArray[string],
-    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-      defaultOAuth2ErrorResponder,
+    onError: OAuth2ErrorResponder = defaultOAuth2ErrorResponder,
 ): RequestHandler =
   ## Wraps a plain Mummy handler with OAuth2 bearer-token authorization.
   let scopes = @requiredScopes
@@ -307,15 +345,14 @@ proc oauth2*(
     wrapped: OAuth2ProtectedRequestHandler,
     config: OAuth2Config,
     requiredScopes: openArray[string],
-    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-      defaultOAuth2ErrorResponder,
+    onError: OAuth2ErrorResponder = defaultOAuth2ErrorResponder,
 ): RequestHandler =
   ## Wraps a Mummy handler and passes validated bearer-token claims to it.
   let scopes = @requiredScopes
   return proc(request: Request) {.gcsafe.} =
     let validation = validateOAuth2BearerRequest(request, config, scopes)
     if not validation.ok:
-      onError(request, validation.failure)
+      request.respondTypedApiValue(onError(validation.failure))
       return
     wrapped(request, validation.claims)
 
@@ -323,8 +360,7 @@ proc oauth2*(
     wrapped: RequestHandler,
     config: OAuth2Config,
     requiredClaims: openArray[OAuth2ScopeClaim],
-    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-      defaultOAuth2ErrorResponder,
+    onError: OAuth2ErrorResponder = defaultOAuth2ErrorResponder,
 ): RequestHandler =
   ## Wraps a plain Mummy handler using structured scope-claim pairs.
   oauth2(wrapped, config, scopeClaimsToScopes(requiredClaims), onError)
@@ -333,8 +369,7 @@ proc oauth2*(
     wrapped: OAuth2ProtectedRequestHandler,
     config: OAuth2Config,
     requiredClaims: openArray[OAuth2ScopeClaim],
-    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-      defaultOAuth2ErrorResponder,
+    onError: OAuth2ErrorResponder = defaultOAuth2ErrorResponder,
 ): RequestHandler =
   ## Wraps a claims-aware Mummy handler using structured scope-claim pairs.
   oauth2(wrapped, config, scopeClaimsToScopes(requiredClaims), onError)

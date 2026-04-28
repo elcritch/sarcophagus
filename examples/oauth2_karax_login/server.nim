@@ -88,12 +88,6 @@ proc htmlEscape(value: string): string =
     else:
       result.add(ch)
 
-proc cookieValue(request: Request, name: string): string =
-  for part in request.headers["Cookie"].split(';'):
-    let pieces = part.strip().split('=', maxsplit = 1)
-    if pieces.len == 2 and pieces[0] == name:
-      return pieces[1]
-
 proc sessionConfig(): BearerTokenConfig =
   initBearerTokenConfig(
     issuer = "karax-login-example",
@@ -136,8 +130,8 @@ proc userFromSubject(subject: string): CurrentUser =
   else:
     CurrentUser(subject: subject, displayName: subject, scopes: @["profile:read"])
 
-proc currentUserFromRequest(request: Request): Option[OAuth2User] {.gcsafe.} =
-  let sessionToken = request.cookieValue("karax_session")
+proc currentUserFromHeaders(headers: ApiHeaders): Option[OAuth2User] {.gcsafe.} =
+  let sessionToken = headers.cookieValue("karax_session")
   if sessionToken.len == 0:
     return none(OAuth2User)
 
@@ -371,7 +365,7 @@ when isMainModule:
     config,
     saveCallback(),
     consumeCallback(),
-    currentUserFromRequest,
+    currentUserFromHeaders,
     loginUrl = "/login",
   )
   router.get("/api/profile", oauth2(profileHandler, config, ["profile:read"]))

@@ -79,8 +79,8 @@ application for the currently logged-in user:
 
 ```nim
 let currentUser: OAuth2CurrentUserLoader =
-  proc(request: Request): Option[OAuth2User] {.gcsafe.} =
-    let session = loadSessionFromCookie(request)
+  proc(headers: ApiHeaders): Option[OAuth2User] {.gcsafe.} =
+    let session = loadSessionFromCookie(headers.cookieValue("app_session"))
     if session.isNone:
       return none(OAuth2User)
     some(OAuth2User(subject: session.get.userId, scopes: @["items:read"]))
@@ -91,7 +91,20 @@ configured login URL.
 
 ## Route Registration
 
-Register the browser authorization endpoint and an extended token endpoint:
+Register the browser authorization endpoint and an extended token endpoint on the
+typed API router:
+
+```nim
+api.registerOAuth2AuthorizationCode(
+  oauthConfig,
+  saveCode,
+  consumeCode,
+  currentUser,
+  loginUrl = "/login",
+)
+```
+
+Plain Mummy applications use the same overload on a `Router`:
 
 ```nim
 router.registerOAuth2AuthorizationCode(
