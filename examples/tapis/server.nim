@@ -215,4 +215,5 @@ when isMainModule:
   echo "TAPIS example server listening on http://", host, ":", port.int
   echo "OpenAPI document: http://", host, ":", port.int, "/swagger.json"
   echo "Swagger docs: http://", host, ":", port.int, "/docs"
+  echo "Swagger docs for endpoint: http://", host, ":", port.int, "/docs/pets"
   server.serve(port, address = host)
