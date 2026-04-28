@@ -1,4 +1,6 @@
-import std/[base64, json, strutils, tables]
+import std/[base64, json, options, strutils, sysrand, tables]
+
+import bearssl/hash
 
 import ./jwt_bearer_tokens
 
@@ -15,6 +17,9 @@ type
     allowedScopes*: seq[string]
     defaultScopes*: seq[string]
     accessTokenTtlSeconds*: int
+    redirectUris*: seq[string]
+    requirePkce*: bool
+    authorizationCodeTtlSeconds*: int
 
   OAuth2Config* = object
     realm*: string
@@ -40,6 +45,38 @@ type
     response*: OAuth2TokenResponse
     failure*: OAuth2Failure
 
+  OAuth2AuthorizationCode* = object
+    code*: string
+    clientId*: string
+    redirectUri*: string
+    subject*: string
+    scopes*: seq[string]
+    codeChallenge*: string
+    codeChallengeMethod*: string
+    issuedAt*: int64
+    expiresAt*: int64
+    consumed*: bool
+
+  OAuth2AuthorizationCodeResult* = object
+    ok*: bool
+    authorizationCode*: OAuth2AuthorizationCode
+    failure*: OAuth2Failure
+
+  OAuth2AuthorizationCodeSaver* =
+    proc(authorizationCode: OAuth2AuthorizationCode) {.gcsafe.}
+    ## Callback used to persist newly issued authorization codes.
+
+  OAuth2AuthorizationCodeConsumer* =
+    proc(code: string): Option[OAuth2AuthorizationCode] {.gcsafe.}
+    ## Callback used to atomically fetch and consume an authorization code.
+
+  InMemoryOAuth2AuthorizationCodeStore* = ref object
+    ## Simple authorization-code store intended for tests and examples.
+    ##
+    ## Production applications should provide callbacks backed by durable,
+    ## concurrency-safe storage.
+    codes*: Table[string, OAuth2AuthorizationCode]
+
   OAuth2ResourceResult* = object
     ok*: bool
     claims*: BearerTokenClaims
@@ -59,6 +96,33 @@ proc constantTimeEquals(lhs: string, rhs: string): bool =
   for idx in 0 ..< compareLen:
     diff = diff or (ord(lhs[idx]) xor ord(rhs[idx]))
   diff == 0
+
+proc bytesToString(bytes: openArray[byte]): string =
+  result = newString(bytes.len)
+  for idx, value in bytes:
+    result[idx] = char(value)
+
+proc base64UrlEncodeBytes(bytes: openArray[byte]): string =
+  result = encode(bytes.bytesToString())
+  result = result.replace('+', '-')
+  result = result.replace('/', '_')
+  result = result.replace("=", "")
+
+proc sha256Bytes(value: string): array[sha256SIZE, byte] =
+  var context: Sha256Context
+  sha256Init(context)
+  if value.len > 0:
+    sha256Update(context, cast[pointer](unsafeAddr value[0]), csize_t(value.len))
+  sha256Out(context, addr result[0])
+
+proc randomUrlSafeSecret(byteCount: int): string =
+  if byteCount <= 0:
+    raise newException(ValueError, "random byte count must be positive")
+
+  var bytes = newSeq[byte](byteCount)
+  if not urandom(bytes):
+    raise newException(OSError, "failed to generate secure random bytes")
+  base64UrlEncodeBytes(bytes)
 
 proc decodeHexNibble(c: char): int =
   case c
@@ -259,6 +323,90 @@ proc resolveRequestedScopes(
 
   client.allowedScopes
 
+proc newInMemoryOAuth2AuthorizationCodeStore*(): InMemoryOAuth2AuthorizationCodeStore =
+  InMemoryOAuth2AuthorizationCodeStore(
+    codes: initTable[string, OAuth2AuthorizationCode]()
+  )
+
+proc save*(
+    store: InMemoryOAuth2AuthorizationCodeStore,
+    authorizationCode: OAuth2AuthorizationCode,
+) {.gcsafe.} =
+  ## Saves an authorization code in the in-memory test store.
+  {.cast(gcsafe).}:
+    store.codes[authorizationCode.code] = authorizationCode
+
+proc consume*(
+    store: InMemoryOAuth2AuthorizationCodeStore, code: string
+): Option[OAuth2AuthorizationCode] {.gcsafe.} =
+  ## Fetches and marks an authorization code as consumed in the in-memory store.
+  {.cast(gcsafe).}:
+    if code notin store.codes:
+      return none(OAuth2AuthorizationCode)
+    var authorizationCode = store.codes[code]
+    if authorizationCode.consumed:
+      return none(OAuth2AuthorizationCode)
+    authorizationCode.consumed = true
+    store.codes[code] = authorizationCode
+    some(authorizationCode)
+
+proc randomOAuth2AuthorizationCode*(): string =
+  ## Returns a URL-safe high-entropy authorization code.
+  randomUrlSafeSecret(32)
+
+proc isPkceValue(value: string): bool =
+  if value.len < 43 or value.len > 128:
+    return false
+  for ch in value:
+    case ch
+    of 'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '.', '_', '~':
+      discard
+    else:
+      return false
+  true
+
+proc pkceS256Challenge*(codeVerifier: string): string =
+  ## Computes the RFC 7636 S256 challenge for a code verifier.
+  base64UrlEncodeBytes(sha256Bytes(codeVerifier))
+
+proc validatePkceVerifier*(
+    codeChallenge, codeChallengeMethod, codeVerifier: string
+): bool =
+  ## Validates a PKCE verifier against a stored challenge.
+  if codeChallenge.len == 0:
+    return false
+  if not isPkceValue(codeVerifier):
+    return false
+
+  let method =
+    if codeChallengeMethod.len == 0:
+      "plain"
+    else:
+      codeChallengeMethod
+
+  case method
+  of "plain":
+    constantTimeEquals(codeChallenge, codeVerifier)
+  of "S256":
+    constantTimeEquals(codeChallenge, pkceS256Challenge(codeVerifier))
+  else:
+    false
+
+proc validateCodeChallenge(
+    codeChallenge, codeChallengeMethod: string
+): tuple[ok: bool, method: string] =
+  let method =
+    if codeChallengeMethod.len == 0:
+      "plain"
+    else:
+      codeChallengeMethod
+
+  if method notin ["plain", "S256"]:
+    return (false, method)
+  if not isPkceValue(codeChallenge):
+    return (false, method)
+  (true, method)
+
 proc scopeClaimsToScopes*(requiredClaims: openArray[OAuth2ScopeClaim]): seq[string] =
   for (name, value) in requiredClaims:
     let trimmedName = name.strip()
@@ -284,12 +432,17 @@ proc initOAuth2Client*(
     defaultScopes: openArray[string] = [],
     subject = "",
     accessTokenTtlSeconds = 0,
+    redirectUris: openArray[string] = [],
+    requirePkce = true,
+    authorizationCodeTtlSeconds = 300,
 ): OAuth2Client =
   let effectiveClientId = clientId.strip()
   if effectiveClientId.len == 0:
     raise newException(ValueError, "clientId must not be empty")
   if accessTokenTtlSeconds < 0:
     raise newException(ValueError, "accessTokenTtlSeconds must not be negative")
+  if authorizationCodeTtlSeconds < 0:
+    raise newException(ValueError, "authorizationCodeTtlSeconds must not be negative")
 
   result.clientId = effectiveClientId
   result.clientSecret = clientSecret
@@ -301,6 +454,13 @@ proc initOAuth2Client*(
     else:
       effectiveClientId
   result.accessTokenTtlSeconds = accessTokenTtlSeconds
+  result.requirePkce = requirePkce
+  result.authorizationCodeTtlSeconds = authorizationCodeTtlSeconds
+  for redirectUri in redirectUris:
+    let effectiveRedirectUri = redirectUri.strip()
+    if effectiveRedirectUri.len == 0:
+      raise newException(ValueError, "redirectUris must not include empty values")
+    result.redirectUris.add(effectiveRedirectUri)
 
   if not validateRequestedScopes(result, result.defaultScopes):
     raise newException(ValueError, "defaultScopes must be a subset of allowedScopes")
@@ -343,6 +503,114 @@ proc toJson*(failure: OAuth2Failure): JsonNode =
     result["error_description"] = newJString(failure.errorDescription)
   if failure.errorUri.len > 0:
     result["error_uri"] = newJString(failure.errorUri)
+
+proc authorizationCodeFailure(
+    statusCode: int, error: string, errorDescription: string, errorUri = ""
+): OAuth2AuthorizationCodeResult =
+  OAuth2AuthorizationCodeResult(
+    ok: false,
+    failure: OAuth2Failure(
+      statusCode: statusCode,
+      error: error,
+      errorDescription: errorDescription,
+      errorUri: errorUri,
+    ),
+  )
+
+proc authorizationCodeSuccess(
+    authorizationCode: OAuth2AuthorizationCode
+): OAuth2AuthorizationCodeResult =
+  OAuth2AuthorizationCodeResult(ok: true, authorizationCode: authorizationCode)
+
+proc allowsRedirectUri(client: OAuth2Client, redirectUri: string): bool =
+  for allowed in client.redirectUris:
+    if allowed == redirectUri:
+      return true
+  false
+
+proc issueAuthorizationCode*(
+    config: OAuth2Config,
+    saveAuthorizationCode: OAuth2AuthorizationCodeSaver,
+    clientId: string,
+    redirectUri: string,
+    subject: string,
+    requestedScopeParam = "",
+    codeChallenge = "",
+    codeChallengeMethod = "",
+    now = nowUnix(),
+    code = "",
+): OAuth2AuthorizationCodeResult =
+  ## Issues an OAuth2 authorization code for a logged-in user.
+  ##
+  ## The caller owns user authentication and consent. `saveAuthorizationCode`
+  ## should persist the code with an expiry and enforce single-use consumption
+  ## through the matching `OAuth2AuthorizationCodeConsumer`.
+  let effectiveClientId = clientId.strip()
+  if effectiveClientId.len == 0:
+    return authorizationCodeFailure(400, "invalid_request", "client_id is required")
+  if effectiveClientId notin config.clients:
+    return authorizationCodeFailure(400, "invalid_client", "Unknown client")
+
+  let client = config.clients[effectiveClientId]
+  let effectiveRedirectUri = redirectUri.strip()
+  if effectiveRedirectUri.len == 0:
+    return authorizationCodeFailure(400, "invalid_request", "redirect_uri is required")
+  if not client.allowsRedirectUri(effectiveRedirectUri):
+    return authorizationCodeFailure(400, "invalid_request", "redirect_uri is not allowed")
+
+  let effectiveSubject = subject.strip()
+  if effectiveSubject.len == 0:
+    return authorizationCodeFailure(400, "invalid_request", "subject is required")
+
+  let requestedScopes = resolveRequestedScopes(client, requestedScopeParam)
+  if not validateRequestedScopes(client, requestedScopes):
+    return authorizationCodeFailure(
+      400, "invalid_scope", "The requested scope is invalid for this client"
+    )
+
+  var effectiveCodeChallenge = codeChallenge.strip()
+  var effectiveCodeChallengeMethod = codeChallengeMethod.strip()
+  if client.requirePkce and effectiveCodeChallenge.len == 0:
+    return authorizationCodeFailure(400, "invalid_request", "PKCE code_challenge is required")
+  if effectiveCodeChallenge.len > 0:
+    let challenge = validateCodeChallenge(
+      effectiveCodeChallenge, effectiveCodeChallengeMethod
+    )
+    if not challenge.ok:
+      return authorizationCodeFailure(400, "invalid_request", "Invalid PKCE code_challenge")
+    effectiveCodeChallengeMethod = challenge.method
+
+  let ttlSeconds =
+    if client.authorizationCodeTtlSeconds > 0:
+      client.authorizationCodeTtlSeconds
+    else:
+      300
+  let effectiveCode =
+    if code.strip().len > 0:
+      code.strip()
+    else:
+      randomOAuth2AuthorizationCode()
+  let authorizationCode = OAuth2AuthorizationCode(
+    code: effectiveCode,
+    clientId: effectiveClientId,
+    redirectUri: effectiveRedirectUri,
+    subject: effectiveSubject,
+    scopes: requestedScopes,
+    codeChallenge: effectiveCodeChallenge,
+    codeChallengeMethod: effectiveCodeChallengeMethod,
+    issuedAt: now,
+    expiresAt: now + int64(ttlSeconds),
+    consumed: false,
+  )
+
+  try:
+    saveAuthorizationCode(authorizationCode)
+  except CatchableError:
+    return authorizationCodeFailure(
+      500, "server_error", "Authorization code storage failed"
+    )
+
+  authorizationCodeSuccess(authorizationCode)
 
 proc issueClientCredentialsToken*(
     config: OAuth2Config,
