@@ -4,8 +4,10 @@ import mummy
 import mummy/routers
 
 import ./core/[swagger, typed_api]
-from ./core/oauth2 import OAuth2Config
-from ./oauth2 import oauth2TokenHandler
+from ./core/oauth2 import
+  OAuth2AuthorizationCodeConsumer, OAuth2AuthorizationCodeSaver, OAuth2Config
+from ./oauth2 import
+  OAuth2CurrentUserLoader, oauth2TokenHandler, registerOAuth2AuthorizationCode
 import ./tapis_security
 
 export swagger, typed_api, tapis_security
@@ -285,6 +287,22 @@ proc addRequestHandler*(
 proc registerOAuth2*(api: ApiRouter, config: OAuth2Config, tokenPath = "/oauth/token") =
   ## Mounts the standard OAuth2 token endpoint on this API router.
   api.router.post(tokenPath, oauth2TokenHandler(config))
+
+proc registerOAuth2AuthorizationCode*(
+    api: ApiRouter,
+    config: OAuth2Config,
+    saveAuthorizationCode: OAuth2AuthorizationCodeSaver,
+    consumeAuthorizationCode: OAuth2AuthorizationCodeConsumer,
+    currentUser: OAuth2CurrentUserLoader,
+    tokenPath = "/oauth/token",
+    authorizationPath = "/oauth/authorize",
+    loginUrl = "/login",
+) =
+  ## Mounts OAuth2 authorization-code endpoints on this API router.
+  api.router.registerOAuth2AuthorizationCode(
+    config, saveAuthorizationCode, consumeAuthorizationCode, currentUser, tokenPath,
+    authorizationPath, loginUrl,
+  )
 
 proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =
   ## Converts an exception to a negotiated TAPIS error response.
