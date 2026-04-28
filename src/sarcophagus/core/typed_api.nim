@@ -46,6 +46,11 @@ type
     headers*: ApiHeaders
     body*: T
 
+  RawResponse*[contentType: static string] = object
+    statusCode*: int
+    headers*: ApiHeaders
+    body*: string
+
   ApiError* = object of CatchableError
     statusCode*: int
     code*: string
@@ -81,6 +86,21 @@ proc apiResponse*[T](
     body: sink T, statusCode = 200, headers: openArray[ApiHeader] = []
 ): ApiResponse[T] =
   ApiResponse[T](statusCode: statusCode, headers: @headers, body: body)
+
+proc rawResponse*[contentType: static string](
+    body: sink string, statusCode = 200, headers: openArray[ApiHeader] = []
+): RawResponse[contentType] =
+  RawResponse[contentType](statusCode: statusCode, headers: @headers, body: body)
+
+proc htmlResponse*(
+    body: sink string, statusCode = 200, headers: openArray[ApiHeader] = []
+): RawResponse["text/html"] =
+  rawResponse["text/html"](body, statusCode, headers)
+
+proc textResponse*(
+    body: sink string, statusCode = 200, headers: openArray[ApiHeader] = []
+): RawResponse["text/plain"] =
+  rawResponse["text/plain"](body, statusCode, headers)
 
 proc newApiError*(
     statusCode: int, message: string, code = "api_error", details: JsonNode = nil
