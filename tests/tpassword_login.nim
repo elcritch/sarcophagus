@@ -98,3 +98,57 @@ suite "password login core":
       validatePasswordLoginSession(config, login.sessionToken, now = 1_700_000_600)
     check not expired.ok
     check expired.failure.code == "invalid_token"
+
+  test "supports request-aware login decisions for policy callbacks":
+    let config = testConfig()
+    let verifier = proc(
+        context: PasswordLoginContext, username, password: string
+    ): PasswordLoginDecision {.gcsafe.} =
+      if context.remoteAddress == "198.51.100.7":
+        return rateLimitPasswordLogin(30)
+      if username == "mfa":
+        return requirePasswordLoginMfa()
+      if username == "alice" and password == "secret":
+        return allowPasswordLogin(
+          initPasswordLoginUser(
+            subject = "user-123",
+            username = "alice",
+            displayName = "Alice Example",
+            scopes = ["profile:read"],
+          )
+        )
+      denyPasswordLogin()
+
+    let allowed = authenticatePasswordLogin(
+      config,
+      verifier,
+      username = "alice",
+      password = "secret",
+      context = passwordLoginContext(remoteAddress = "203.0.113.9"),
+      now = 1_700_000_000,
+    )
+    check allowed.ok
+
+    let limited = authenticatePasswordLogin(
+      config,
+      verifier,
+      username = "alice",
+      password = "secret",
+      context = passwordLoginContext(remoteAddress = "198.51.100.7"),
+      now = 1_700_000_000,
+    )
+    check not limited.ok
+    check limited.failure.statusCode == 429
+    check limited.failure.code == "rate_limited"
+    check limited.failure.retryAfterSeconds == 30
+
+    let mfa = authenticatePasswordLogin(
+      config,
+      verifier,
+      username = "mfa",
+      password = "secret",
+      context = passwordLoginContext(remoteAddress = "203.0.113.9"),
+      now = 1_700_000_000,
+    )
+    check not mfa.ok
+    check mfa.failure.code == "mfa_required"

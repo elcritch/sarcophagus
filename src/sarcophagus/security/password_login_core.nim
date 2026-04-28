@@ -26,10 +26,39 @@ type
     sessionTtlSeconds*: int
     sessionScopes*: seq[string]
 
+  PasswordLoginContext* = object
+    ## Request-adjacent metadata for verifier callbacks.
+    ##
+    ## The core stays HTTP-framework agnostic. Mummy or TAPIS login handlers can
+    ## populate these fields from a request before calling `authenticatePasswordLogin`.
+    remoteAddress*: string
+    userAgent*: string
+    requestId*: string
+    tenant*: string
+    metadata*: seq[(string, string)]
+
+  PasswordLoginDecisionKind* = enum
+    passwordLoginAllowed
+    passwordLoginDenied
+    passwordLoginRateLimited
+    passwordLoginMfaRequired
+
+  PasswordLoginDecision* = object
+    ## Rich verifier result for rate limiting, MFA, audit, and future policies.
+    case kind*: PasswordLoginDecisionKind
+    of passwordLoginAllowed:
+      user*: PasswordLoginUser
+    else:
+      statusCode*: int
+      code*: string
+      message*: string
+      retryAfterSeconds*: int
+
   PasswordLoginFailure* = object
     statusCode*: int
     code*: string
     message*: string
+    retryAfterSeconds*: int
 
   PasswordLoginResult* = object
     ok*: bool
@@ -55,6 +84,11 @@ type
     proc(username, password: string): Option[PasswordLoginUser] {.gcsafe.}
     ## Callback that verifies application-owned username/password credentials.
 
+  PasswordLoginDecisionVerifier* = proc(
+    context: PasswordLoginContext, username, password: string
+  ): PasswordLoginDecision {.gcsafe.}
+    ## Request-aware callback for login policy, rate limiting, MFA, and auditing.
+
   PasswordLoginAccountLoader* =
     proc(username: string): Option[PasswordLoginAccount] {.gcsafe.}
     ## Callback used by `passwordLoginVerifier` to load account records.
@@ -67,6 +101,41 @@ proc failure(statusCode: int, code, message: string): PasswordLoginResult =
     failure: PasswordLoginFailure(statusCode: statusCode, code: code, message: message),
   )
 
+proc failure(decision: PasswordLoginDecision): PasswordLoginResult =
+  let statusCode =
+    if decision.statusCode > 0:
+      decision.statusCode
+    else:
+      case decision.kind
+      of passwordLoginRateLimited: 429
+      of passwordLoginMfaRequired: 403
+      else: 401
+  let code =
+    if decision.code.len > 0:
+      decision.code
+    else:
+      case decision.kind
+      of passwordLoginRateLimited: "rate_limited"
+      of passwordLoginMfaRequired: "mfa_required"
+      else: "invalid_credentials"
+  let message =
+    if decision.message.len > 0:
+      decision.message
+    else:
+      case decision.kind
+      of passwordLoginRateLimited: "Too many login attempts"
+      of passwordLoginMfaRequired: "Multi-factor authentication is required"
+      else: "Username or password is invalid"
+  PasswordLoginResult(
+    ok: false,
+    failure: PasswordLoginFailure(
+      statusCode: statusCode,
+      code: code,
+      message: message,
+      retryAfterSeconds: decision.retryAfterSeconds,
+    ),
+  )
+
 proc sessionFailure(
     statusCode: int, code, message: string
 ): PasswordLoginSessionResult =
@@ -77,6 +146,82 @@ proc sessionFailure(
 
 proc normalizeScopes(scopes: openArray[string]): seq[string] =
   parseScopeList(scopes.join(" "))
+
+proc passwordLoginContext*(
+    remoteAddress = "",
+    userAgent = "",
+    requestId = "",
+    tenant = "",
+    metadata: openArray[(string, string)] = [],
+): PasswordLoginContext =
+  ## Builds request-adjacent login context for decision verifier callbacks.
+  PasswordLoginContext(
+    remoteAddress: remoteAddress.strip(),
+    userAgent: userAgent.strip(),
+    requestId: requestId.strip(),
+    tenant: tenant.strip(),
+    metadata: @metadata,
+  )
+
+proc metadataValue*(context: PasswordLoginContext, key: string): Option[string] =
+  ## Returns the first metadata value for `key`.
+  for (candidateKey, value) in context.metadata:
+    if candidateKey == key:
+      return some(value)
+  none(string)
+
+proc allowPasswordLogin*(user: PasswordLoginUser): PasswordLoginDecision =
+  ## Allows login for an authenticated user.
+  PasswordLoginDecision(kind: passwordLoginAllowed, user: user)
+
+proc denyPasswordLogin*(
+    code = "invalid_credentials",
+    message = "Username or password is invalid",
+    statusCode = 401,
+): PasswordLoginDecision =
+  ## Denies login with a policy-specific code and message.
+  PasswordLoginDecision(
+    kind: passwordLoginDenied, statusCode: statusCode, code: code, message: message
+  )
+
+proc rateLimitPasswordLogin*(
+    retryAfterSeconds: int,
+    code = "rate_limited",
+    message = "Too many login attempts",
+    statusCode = 429,
+): PasswordLoginDecision =
+  ## Denies login because the caller is rate limited.
+  PasswordLoginDecision(
+    kind: passwordLoginRateLimited,
+    statusCode: statusCode,
+    code: code,
+    message: message,
+    retryAfterSeconds: retryAfterSeconds,
+  )
+
+proc requirePasswordLoginMfa*(
+    code = "mfa_required",
+    message = "Multi-factor authentication is required",
+    statusCode = 403,
+): PasswordLoginDecision =
+  ## Denies login because an additional MFA step is required.
+  PasswordLoginDecision(
+    kind: passwordLoginMfaRequired, statusCode: statusCode, code: code, message: message
+  )
+
+proc toDecisionVerifier*(
+    verifier: PasswordLoginVerifier
+): PasswordLoginDecisionVerifier =
+  ## Adapts the simple username/password verifier into a decision verifier.
+  result = proc(
+      context: PasswordLoginContext, username, password: string
+  ): PasswordLoginDecision {.gcsafe.} =
+    discard context
+    let user = verifier(username, password)
+    if user.isSome:
+      allowPasswordLogin(user.get())
+    else:
+      denyPasswordLogin()
 
 proc initPasswordLoginConfig*(
     sessionConfig: BearerTokenConfig,
@@ -193,25 +338,26 @@ proc sessionTokenScopes(
 
 proc authenticatePasswordLogin*(
     config: PasswordLoginConfig,
-    verifyCredentials: PasswordLoginVerifier,
+    verifyCredentials: PasswordLoginDecisionVerifier,
     username, password: string,
+    context = passwordLoginContext(),
     now = nowUnix(),
 ): PasswordLoginResult =
   ## Verifies username/password credentials and mints a signed login session.
   if username.strip().len == 0 or password.len == 0:
     return failure(401, "invalid_credentials", "Username or password is invalid")
 
-  let user = verifyCredentials(username, password)
-  if user.isNone:
-    return failure(401, "invalid_credentials", "Username or password is invalid")
-  if user.get().subject.strip().len == 0:
+  let decision = verifyCredentials(context, username, password)
+  if decision.kind != passwordLoginAllowed:
+    return failure(decision)
+  if decision.user.subject.strip().len == 0:
     return failure(500, "invalid_user", "Verifier returned an invalid user")
 
   let token = mintBearerToken(
     config.sessionConfig,
     initBearerTokenSpec(
-      subject = user.get().subject,
-      scopes = sessionTokenScopes(config, user.get().scopes),
+      subject = decision.user.subject,
+      scopes = sessionTokenScopes(config, decision.user.scopes),
       ttlSeconds = config.sessionTtlSeconds,
       issuedAt = now,
     ),
@@ -219,9 +365,25 @@ proc authenticatePasswordLogin*(
 
   PasswordLoginResult(
     ok: true,
-    user: user.get(),
+    user: decision.user,
     sessionToken: token,
     expiresAt: now + int64(config.sessionTtlSeconds),
+  )
+
+proc authenticatePasswordLogin*(
+    config: PasswordLoginConfig,
+    verifyCredentials: PasswordLoginVerifier,
+    username, password: string,
+    now = nowUnix(),
+): PasswordLoginResult =
+  ## Verifies username/password credentials using the simple verifier callback.
+  authenticatePasswordLogin(
+    config,
+    verifyCredentials.toDecisionVerifier(),
+    username,
+    password,
+    passwordLoginContext(),
+    now,
   )
 
 proc userScopesFromSession(tokenScopes, sessionScopes: openArray[string]): seq[string] =
