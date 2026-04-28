@@ -145,6 +145,9 @@ proc valueErrorHandler(): ItemOut {.gcsafe.} =
 proc apiErrorHandler(): ItemOut {.gcsafe.} =
   raiseApiError(409, "item conflict", "item_conflict", %*{"id": 42})
 
+proc htmlDocs(): RawResponse["text/html"] {.gcsafe.} =
+  htmlResponse("<!DOCTYPE html><h1>Docs</h1>")
+
 proc rawMummyStatus(request: Request) {.gcsafe.} =
   var headers: mummy.HttpHeaders
   headers["Content-Type"] = "application/json; charset=utf-8"
@@ -168,6 +171,7 @@ proc buildApi(includeStackTraces = false): ApiRouter =
   api.get("/unnamed-tuple", getUnnamedTupleItem, summary = "Get unnamed tuple")
   api.get("/value-error", valueErrorHandler)
   api.get("/api-error", apiErrorHandler)
+  api.get("/docs", htmlDocs, summary = "HTML docs")
   api.mountOpenApi()
   api
 
@@ -218,6 +222,17 @@ suite "typed mummy tapis":
       let typedBody = parseJson(typedResponse.body)
       check typedBody["id"].getInt() == 17
       check typedBody["verbose"].getBool() == true
+
+  test "serves raw typed responses without json encoding":
+    withTestServer do(baseUrl: string):
+      var client = newHttpClient(timeout = 5_000)
+      defer:
+        client.close()
+
+      let response = client.get(baseUrl & "/docs")
+      check response.code.int == 200
+      check response.headers["Content-Type"] == "text/html"
+      check response.body == "<!DOCTYPE html><h1>Docs</h1>"
 
   test "converts typed handlers to plain mummy handlers":
     randomize()
@@ -475,6 +490,11 @@ suite "typed mummy tapis":
       check queriedOperation["parameters"][1]["name"].getStr() == "mode"
       check queriedOperation["parameters"][1]["in"].getStr() == "query"
       check queriedOperation["requestBody"]["required"].getBool() == true
+
+      let docsOperation = spec["paths"]["/docs"]["get"]
+      let docsContent = docsOperation["responses"]["200"]["content"]
+      check docsContent.hasKey("text/html")
+      check not docsContent.hasKey("application/json")
 
   when defined(feature.sarcophagus.cbor):
     test "negotiates cbor request and response bodies":

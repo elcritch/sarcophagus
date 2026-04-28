@@ -102,6 +102,17 @@ proc respondApi[T](request: Request, value: ApiResponse[T], config: ApiConfig) =
     value.headers.toHttpHeaders(),
   )
 
+proc respondRaw[contentType: static string](
+    request: Request, value: RawResponse[contentType]
+) =
+  var headers = value.headers.toHttpHeaders()
+  headers["Content-Type"] = contentType
+  if request.httpMethod == "HEAD":
+    headers["Content-Length"] = $value.body.len
+    request.respond(value.statusCode, headers)
+  else:
+    request.respond(value.statusCode, headers, value.body)
+
 proc respondRouteValue[T](
     request: Request, value: T, config: ApiConfig, responseStatus: int
 ) =
@@ -111,6 +122,14 @@ proc respondRouteValue[T](
     request: Request, value: ApiResponse[T], config: ApiConfig, responseStatus: int
 ) =
   request.respondApi(value, config)
+
+proc respondRouteValue[contentType: static string](
+    request: Request,
+    value: RawResponse[contentType],
+    config: ApiConfig,
+    responseStatus: int,
+) =
+  request.respondRaw(value)
 
 proc requestParam(request: Request, name: string): Option[string] =
   if name in request.pathParams:

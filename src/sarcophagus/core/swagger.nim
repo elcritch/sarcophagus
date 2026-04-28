@@ -98,6 +98,11 @@ proc responseOpenApiSchema*[T](target: typedesc[T]): JsonNode =
 proc responseOpenApiSchema*[T](target: typedesc[ApiResponse[T]]): JsonNode =
   openApiSchema(T)
 
+proc responseOpenApiSchema*[contentType: static string](
+    target: typedesc[RawResponse[contentType]]
+): JsonNode =
+  %*{"type": "string"}
+
 proc pathHasParam*(path, name: string): bool =
   let needle = "@" & name
   for part in path.split('/'):
@@ -208,6 +213,15 @@ proc contentSchema*(schema: JsonNode): JsonNode =
   when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
     result["application/msgpack"] = %*{"schema": schema}
 
+proc responseContentSchema*[T](target: typedesc[T]): JsonNode =
+  contentSchema(responseOpenApiSchema(T))
+
+proc responseContentSchema*[contentType: static string](
+    target: typedesc[RawResponse[contentType]]
+): JsonNode =
+  result = newJObject()
+  result[contentType] = %*{"schema": responseOpenApiSchema(RawResponse[contentType])}
+
 proc endpointOperation*[In, Out](
     httpMethod, path: string,
     source: ApiDecodeSource,
@@ -241,10 +255,8 @@ proc endpointOperation*[In, Out](
 
   result["responses"] =
     %*{
-      $meta.responseStatus: {
-        "description": "Successful response",
-        "content": contentSchema(responseOpenApiSchema(Out)),
-      },
+      $meta.responseStatus:
+        {"description": "Successful response", "content": responseContentSchema(Out)},
       "400": {"description": "Invalid request"},
       "500": {"description": "Internal server error"},
     }
@@ -274,10 +286,8 @@ proc endpointOperationWithParams*[Out](
     result["parameters"] = parameters
   result["responses"] =
     %*{
-      $meta.responseStatus: {
-        "description": "Successful response",
-        "content": contentSchema(responseOpenApiSchema(Out)),
-      },
+      $meta.responseStatus:
+        {"description": "Successful response", "content": responseContentSchema(Out)},
       "400": {"description": "Invalid request"},
       "500": {"description": "Internal server error"},
     }
