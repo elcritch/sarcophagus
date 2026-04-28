@@ -63,7 +63,8 @@ Core pieces:
 - `initApiRouter(title, version, config)` creates a typed Mummy router wrapper.
 - `tapi(method, path, ...)` marks a proc as an API endpoint.
 - `api.add(handler)` registers a `tapi`-annotated proc.
-- `api.registerOAuth2(config)` mounts the standard `/oauth/token` endpoint.
+- `api.registerOAuth2(config)` mounts the standard typed-router `/oauth/token`
+  endpoint.
 - `api.mountOpenApi()` mounts `/swagger.json`.
 - `ApiResponse[T]` lets a handler set status codes and headers.
 - `raiseApiError(status, message, code, details)` produces structured error JSON.
@@ -316,16 +317,24 @@ let validation = validateOAuth2BearerToken(
 )
 ```
 
-`sarcophagus/oauth2` contains Mummy-oriented helpers for non-TAPIS handlers:
+Typed TAPIS registration is the first-class OAuth2 setup:
 
-- `oauth2TokenHandler(config)` returns a raw Mummy token endpoint handler.
-- `registerOAuth2(router, config)` mounts that token endpoint at `/oauth/token`.
+- `api.registerOAuth2(config)` mounts the token endpoint.
+- `api.registerOAuth2AuthorizationCode(...)` mounts the browser authorization
+  endpoint and token endpoint for authorization-code login.
+- `security = oauth2(...)` and `withSecurity(...)` keep OpenAPI metadata in sync
+  with runtime bearer-token enforcement.
+
+For non-TAPIS handlers, use the same names on a plain Mummy `Router`:
+
+- `oauth2TokenHandler(config)` returns a raw token endpoint handler.
+- `oauth2AuthorizeHandler(...)` returns a raw authorization endpoint.
+- `router.registerOAuth2(config)` mounts the token endpoint at `/oauth/token`.
+- `router.registerOAuth2AuthorizationCode(...)` mounts raw authorization-code
+  endpoints.
 - `requireOAuth2BearerAuth(request, config, scopes)` validates a request in place.
 - `oauth2(handler, config, scopes)` wraps a raw handler.
 - `withOAuth2(config, scopes):` rewrites raw Mummy route registrations in a block.
-
-For TAPIS routes, prefer `security = oauth2(...)` or `withSecurity(...)` so
-OpenAPI metadata stays in sync with runtime enforcement.
 
 ## `sarcophagus/security/secret_hashing`
 

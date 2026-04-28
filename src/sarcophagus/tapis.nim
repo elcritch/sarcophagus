@@ -6,8 +6,7 @@ import mummy/routers
 import ./core/[swagger, typed_api]
 from ./core/oauth2 import
   OAuth2AuthorizationCodeConsumer, OAuth2AuthorizationCodeSaver, OAuth2Config
-from ./oauth2 import
-  OAuth2CurrentUserLoader, oauth2TokenHandler, registerOAuth2AuthorizationCode
+from ./oauth2 import OAuth2CurrentUserLoader, oauth2AuthorizeHandler, oauth2TokenHandler
 import ./tapis_utils
 import ./tapis_security
 
@@ -286,8 +285,8 @@ proc addRequestHandler*(
   api.router.addRoute(httpMethod, path, handler)
 
 proc registerOAuth2*(api: ApiRouter, config: OAuth2Config, tokenPath = "/oauth/token") =
-  ## Mounts the standard OAuth2 token endpoint on this API router.
-  api.router.post(tokenPath, oauth2TokenHandler(config))
+  ## Mounts the OAuth2 token endpoint on this typed API router.
+  api.addRequestHandler("POST", tokenPath, oauth2TokenHandler(config))
 
 proc registerOAuth2AuthorizationCode*(
     api: ApiRouter,
@@ -300,9 +299,13 @@ proc registerOAuth2AuthorizationCode*(
     loginUrl = "/login",
 ) =
   ## Mounts OAuth2 authorization-code endpoints on this API router.
-  api.router.registerOAuth2AuthorizationCode(
-    config, saveAuthorizationCode, consumeAuthorizationCode, currentUser, tokenPath,
-    authorizationPath, loginUrl,
+  api.addRequestHandler(
+    "GET",
+    authorizationPath,
+    oauth2AuthorizeHandler(config, saveAuthorizationCode, currentUser, loginUrl),
+  )
+  api.addRequestHandler(
+    "POST", tokenPath, oauth2TokenHandler(config, consumeAuthorizationCode)
   )
 
 proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =

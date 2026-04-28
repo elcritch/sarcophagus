@@ -28,8 +28,7 @@ proc hashedOAuth2TokenHandler*(
     loadClient: HashedOAuth2ClientLoader,
     onAudit: HashedOAuth2AuditProc = noopHashedOAuth2Audit,
     policy = defaultSecretHashPolicy(),
-    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
-      defaultOAuth2TokenErrorResponder,
+    onError: OAuth2ErrorResponder = defaultOAuth2TokenErrorResponder,
 ): RequestHandler =
   ## Returns a Mummy `/oauth/token` handler backed by hashed client records.
   ##
@@ -56,7 +55,7 @@ proc hashedOAuth2TokenHandler*(
     )
 
     if not tokenResult.ok:
-      onError(request, tokenResult.failure)
+      request.respondTypedApiValue(onError(tokenResult.failure))
       return
 
     var headers: HttpHeaders

@@ -1,8 +1,9 @@
-import std/[httpclient, json, options, random, unittest]
+import std/[httpclient, json, options, random, strutils, unittest]
 
 import mummy
 
 import sarcophagus/[core/jwt_bearer_tokens, core/oauth2, tapis]
+from sarcophagus/oauth2 import OAuth2User
 
 type
   ServerThreadArgs = object
@@ -39,6 +40,58 @@ proc testConfig(): OAuth2Config =
     ],
     accessTokenTtlSeconds = 900,
   )
+
+proc authorizationCodeConfig(): OAuth2Config =
+  let tokenConfig = initBearerTokenConfig(
+    issuer = "tapis-test-server",
+    audience = "tapis-test-api",
+    keys = [SigningKey(kid: "v1", secret: "secret-a")],
+  )
+
+  initOAuth2Config(
+    realm = "tapis-test",
+    tokenConfig = tokenConfig,
+    clients = [
+      initOAuth2Client(
+        clientId = "browser-client",
+        clientSecret = "",
+        subject = "browser-client",
+        allowedScopes = ["items:read", "items:write"],
+        defaultScopes = ["items:read"],
+        redirectUris = ["http://client.example/callback"],
+        requirePkce = true,
+      )
+    ],
+    accessTokenTtlSeconds = 900,
+  )
+
+proc currentUser(headers: ApiHeaders): Option[OAuth2User] {.gcsafe.} =
+  discard headers
+  some(OAuth2User(subject: "user-1", displayName: "User One", scopes: @["items:read"]))
+
+proc codeFromLocation(location: string): string =
+  let marker = "code="
+  let start = location.find(marker)
+  if start < 0:
+    return ""
+  let valueStart = start + marker.len
+  let valueEnd = location.find('&', valueStart)
+  if valueEnd < 0:
+    location[valueStart .. ^1]
+  else:
+    location[valueStart ..< valueEnd]
+
+proc saveCallback(
+    store: InMemoryOAuth2AuthorizationCodeStore
+): OAuth2AuthorizationCodeSaver =
+  result = proc(authorizationCode: OAuth2AuthorizationCode) {.gcsafe.} =
+    store.save(authorizationCode)
+
+proc consumeCallback(
+    store: InMemoryOAuth2AuthorizationCodeStore
+): OAuth2AuthorizationCodeConsumer =
+  result = proc(code: string): Option[OAuth2AuthorizationCode] {.gcsafe.} =
+    store.consume(code)
 
 proc issueToken(config: OAuth2Config, scope: string): string =
   let token = issueClientCredentialsToken(
@@ -254,6 +307,62 @@ suite "typed mummy tapis security":
       let body = parseJson(response.body)
       check body["token_type"].getStr() == "Bearer"
       check body["scope"].getStr() == "items:read"
+
+  test "registers authorization-code endpoints on typed api routers":
+    randomize()
+    let config = authorizationCodeConfig()
+    let store = newInMemoryOAuth2AuthorizationCodeStore()
+    let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+    let api = initApiRouter("TAPIS OAuth2 Login Test API", "1.0.0")
+    api.registerOAuth2AuthorizationCode(
+      config,
+      store.saveCallback(),
+      store.consumeCallback(),
+      currentUser,
+      loginUrl = "/login",
+    )
+
+    let server = newServer(api.router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(maxRedirects = 0, timeout = 5_000)
+    defer:
+      client.close()
+
+    let baseUrl = "http://127.0.0.1:" & $portNumber
+    let authorize = client.get(
+      baseUrl & "/oauth/authorize?response_type=code&client_id=browser-client" &
+        "&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback&scope=items%3Aread" &
+        "&state=state-1&code_challenge=" & pkceS256Challenge(verifier) &
+        "&code_challenge_method=S256"
+    )
+    check authorize.code.int == 302
+    let code = authorize.headers["Location"].codeFromLocation()
+    check code.len > 0
+
+    let token = client.request(
+      baseUrl & "/oauth/token",
+      httpMethod = HttpPost,
+      headers = newHttpHeaders({"Content-Type": "application/x-www-form-urlencoded"}),
+      body =
+        "grant_type=authorization_code&client_id=browser-client" & "&code=" & code &
+        "&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback" & "&code_verifier=" &
+        verifier,
+    )
+    check token.code.int == 200
+    let body = parseJson(token.body)
+    check body["token_type"].getStr() == "Bearer"
+    check body["scope"].getStr() == "items:read"
 
   test "emits oauth2 security metadata in openapi":
     withTestServer do(baseUrl: string, readToken, writeToken: string):

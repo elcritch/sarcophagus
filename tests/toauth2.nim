@@ -27,6 +27,14 @@ proc okHandler(request: Request) {.gcsafe.} =
 proc typedStatusHandler(request: Request): ApiResponse[JsonNode] {.gcsafe.} =
   apiResponse(%*{"status": "typed", "path": request.path}, statusCode = 202)
 
+proc customTokenError(failure: OAuth2Failure): OAuth2ApiError {.gcsafe.} =
+  apiResponse(
+    OAuth2ErrorResponse(
+      status: "custom-error", error: OAuth2FailurePayload(error: failure.error)
+    ),
+    statusCode = 499,
+  )
+
 proc testConfig(): OAuth2Config =
   let tokenConfig = initBearerTokenConfig(
     issuer = "sam-sync-server",
@@ -85,8 +93,8 @@ proc consumeCallback(
   result = proc(code: string): Option[OAuth2AuthorizationCode] {.gcsafe.} =
     store.consume(code)
 
-proc currentUser(request: Request): Option[OAuth2User] {.gcsafe.} =
-  discard request
+proc currentUser(headers: ApiHeaders): Option[OAuth2User] {.gcsafe.} =
+  discard headers
   some(OAuth2User(subject: "user-123", scopes: @["sync:read"]))
 
 proc codeFromLocation(location: string): string =
@@ -309,6 +317,47 @@ suite "mummy oauth2":
     check response.headers["Pragma"] == "no-cache"
     check response.headers["WWW-Authenticate"] == """Basic realm="sam-sync""""
     let body = parseJson(response.body)
+    check body["error"]["error"].getStr() == "invalid_client"
+
+  test "token endpoint accepts typed error responders":
+    randomize()
+    let config = testConfig()
+
+    var router: Router
+    router.post("/oauth/token", oauth2TokenHandler(config, onError = customTokenError))
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let response = client.request(
+      "http://127.0.0.1:" & $portNumber & "/oauth/token",
+      httpMethod = HttpPost,
+      headers = newHttpHeaders(
+        {
+          "Authorization": "Basic cmVhZGVyLWFwcDpiYWQ=",
+          "Content-Type": "application/x-www-form-urlencoded",
+        }
+      ),
+      body = "grant_type=client_credentials",
+    )
+
+    check response.code.int == 499
+    let body = parseJson(response.body)
+    check body["status"].getStr() == "custom-error"
     check body["error"]["error"].getStr() == "invalid_client"
 
   test "token endpoint accepts json body without grant_type or scope":
