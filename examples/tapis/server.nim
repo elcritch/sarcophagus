@@ -1,6 +1,6 @@
 import std/[json, options, os, strutils]
 
-import mummy
+import mummy, mummy/routers
 
 import sarcophagus/tapis
 
@@ -106,6 +106,28 @@ proc deletePet(params: Params[PetPath]): MessageResponse {.gcsafe.} =
 proc brokenRoute(): MessageResponse {.gcsafe.} =
   raise newException(ValueError, "simulated validation failure")
 
+proc swaggerUiHandler(request: Request) {.gcsafe.} =
+  var headers = emptyHttpHeaders()
+  headers["Content-Type"] = "text/html"
+  request.respond(
+    200, headers,
+    """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>StockHub API Docs</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+  <div id="redoc"></div>
+  <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+  <script>
+    Redoc.init(window.location.origin + '/swagger.json', {}, document.getElementById('redoc'));
+  </script>
+</body>
+</html>""",
+  )
+
 proc parsePort(): Port =
   let rawPort =
     if paramCount() >= 1:
@@ -146,8 +168,10 @@ when isMainModule:
     "/broken", brokenRoute, summary = "Example error response", tags = ["system"]
   )
   apiRouter.mountOpenApi()
+  apiRouter.router.addRoute("GET", "/docs", swaggerUiHandler)
 
   let server = newServer(apiRouter.router, workerThreads = 1)
   echo "TAPIS example server listening on http://", host, ":", port.int
   echo "OpenAPI document: http://", host, ":", port.int, "/swagger.json"
+  echo "Swagger docs: http://", host, ":", port.int, "/docs"
   server.serve(port, address = host)
