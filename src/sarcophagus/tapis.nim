@@ -325,6 +325,14 @@ proc toApiHandler*[Out](
     except CatchableError as e:
       request.respondApiError(e, config)
 
+proc toMummyHandler*[Out](
+    handler: proc(): Out {.gcsafe.},
+    config: ApiConfig = defaultApiConfig(),
+    responseStatus = 200,
+): RequestHandler =
+  ## Converts a typed no-argument TAPIS-style handler to a plain Mummy handler.
+  toApiHandler(handler, config, responseStatus)
+
 proc toApiHandler*[Out](
     handler: proc(request: Request): Out {.gcsafe.},
     config: ApiConfig,
@@ -336,6 +344,14 @@ proc toApiHandler*[Out](
       request.respondRouteValue(handler(request), config, responseStatus)
     except CatchableError as e:
       request.respondApiError(e, config)
+
+proc toMummyHandler*[Out](
+    handler: proc(request: Request): Out {.gcsafe.},
+    config: ApiConfig = defaultApiConfig(),
+    responseStatus = 200,
+): RequestHandler =
+  ## Converts a request-aware typed TAPIS-style handler to a plain Mummy handler.
+  toApiHandler(handler, config, responseStatus)
 
 proc toApiHandler*[In, Out](
     handler: proc(input: In): Out {.gcsafe.},
@@ -351,6 +367,15 @@ proc toApiHandler*[In, Out](
     except CatchableError as e:
       request.respondApiError(e, config)
 
+proc toMummyHandler*[In, Out](
+    handler: proc(input: In): Out {.gcsafe.},
+    source: ApiDecodeSource,
+    config: ApiConfig = defaultApiConfig(),
+    responseStatus = 200,
+): RequestHandler =
+  ## Converts a typed-input TAPIS-style handler to a plain Mummy handler.
+  toApiHandler(handler, config, source, responseStatus)
+
 proc toApiHandler*[In, Out](
     handler: proc(request: Request, input: In): Out {.gcsafe.},
     config: ApiConfig,
@@ -364,6 +389,15 @@ proc toApiHandler*[In, Out](
       request.respondRouteValue(handler(request, input), config, responseStatus)
     except CatchableError as e:
       request.respondApiError(e, config)
+
+proc toMummyHandler*[In, Out](
+    handler: proc(request: Request, input: In): Out {.gcsafe.},
+    source: ApiDecodeSource,
+    config: ApiConfig = defaultApiConfig(),
+    responseStatus = 200,
+): RequestHandler =
+  ## Converts a request-aware typed-input TAPIS-style handler to a plain Mummy handler.
+  toApiHandler(handler, config, source, responseStatus)
 
 proc route*[Out](
     api: ApiRouter,
@@ -936,6 +970,10 @@ proc mountOpenApi*(api: ApiRouter, path = "/swagger.json") =
 proc toHandler*(api: ApiRouter): RequestHandler =
   ## Converts the wrapped Mummy router to a Mummy request handler.
   api.router.toHandler()
+
+proc toMummyHandler*(api: ApiRouter): RequestHandler =
+  ## Converts the wrapped TAPIS API router to a plain Mummy request handler.
+  api.toHandler()
 
 converter toMummyRouter*(api: ApiRouter): Router =
   ## Allows an `ApiRouter` to be passed where a Mummy `Router` is expected.

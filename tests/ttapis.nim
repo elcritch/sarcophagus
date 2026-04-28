@@ -219,6 +219,36 @@ suite "typed mummy tapis":
       check typedBody["id"].getInt() == 17
       check typedBody["verbose"].getBool() == true
 
+  test "converts typed handlers to plain mummy handlers":
+    randomize()
+    var router: Router
+    router.get("/converted/@id", toMummyHandler(getItem, adsParams))
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let response =
+      client.get("http://127.0.0.1:" & $portNumber & "/converted/21?verbose=true")
+    check response.code.int == 200
+    let body = parseJson(response.body)
+    check body["id"].getInt() == 21
+    check body["name"].getStr() == "item-21"
+    check body["verbose"].getBool() == true
+
   test "registers tapi pragma handlers with api.add":
     withTestServer do(baseUrl: string):
       var client = newHttpClient(timeout = 5_000)
