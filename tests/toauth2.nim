@@ -3,7 +3,7 @@ import std/[httpclient, json, options, random, strutils, unittest]
 import mummy
 import mummy/routers
 
-import sarcophagus/[core/jwt_bearer_tokens, oauth2, core/oauth2]
+import sarcophagus/[core/jwt_bearer_tokens, core/typed_api, oauth2, core/oauth2]
 
 type ServerThreadArgs = object
   server: Server
@@ -23,6 +23,9 @@ proc claimsHandler(request: Request, claims: BearerTokenClaims) {.gcsafe.} =
 
 proc okHandler(request: Request) {.gcsafe.} =
   request.respondJson(200, %*{"status": "ok"})
+
+proc typedStatusHandler(request: Request): ApiResponse[JsonNode] {.gcsafe.} =
+  apiResponse(%*{"status": "typed", "path": request.path}, statusCode = 202)
 
 proc testConfig(): OAuth2Config =
   let tokenConfig = initBearerTokenConfig(
@@ -234,6 +237,36 @@ suite "mummy oauth2":
     let unauthenticated = client.get(baseUrl & "/claims")
     check unauthenticated.code.int == 401
     check unauthenticated.headers["WWW-Authenticate"] == """Bearer realm="sam-sync""""
+
+  test "typed mummy handler shim calls request-aware typed handlers":
+    randomize()
+
+    var router: Router
+    router.get("/typed-status", typedMummyHandler(typedStatusHandler))
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let response = client.get("http://127.0.0.1:" & $portNumber & "/typed-status")
+    check response.code.int == 202
+    check response.headers["Content-Type"] == jsonContentType
+    let body = parseJson(response.body)
+    check body["status"].getStr() == "typed"
+    check body["path"].getStr() == "/typed-status"
 
   test "token endpoint returns invalid_client failures":
     randomize()

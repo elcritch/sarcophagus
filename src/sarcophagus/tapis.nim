@@ -8,9 +8,10 @@ from ./core/oauth2 import
   OAuth2AuthorizationCodeConsumer, OAuth2AuthorizationCodeSaver, OAuth2Config
 from ./oauth2 import
   OAuth2CurrentUserLoader, oauth2TokenHandler, registerOAuth2AuthorizationCode
+import ./tapis_utils
 import ./tapis_security
 
-export swagger, typed_api, tapis_security
+export swagger, typed_api, tapis_security, tapis_utils
 
 type ApiRouter* = ref object
   ## Typed API router wrapper around a Mummy `Router`.
