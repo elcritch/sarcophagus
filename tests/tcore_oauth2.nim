@@ -1,6 +1,6 @@
 import std/[json, options, strutils, unittest]
 
-import sarcophagus/[core/jwt_bearer_tokens, core/oauth2]
+import sarcophagus/[core/jwt_bearer_tokens, oauth2/core]
 
 proc testConfig(): OAuth2Config =
   let tokenConfig = initBearerTokenConfig(

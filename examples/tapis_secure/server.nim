@@ -2,7 +2,7 @@ import std/[json, options, os, strutils]
 
 import mummy
 
-import sarcophagus/[core/jwt_bearer_tokens, core/oauth2, tapis]
+import sarcophagus/[core/jwt_bearer_tokens, oauth2/core, tapis]
 
 type
   HealthResponse = object

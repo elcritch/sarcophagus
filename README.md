@@ -268,10 +268,17 @@ The same security metadata is used twice: the runtime wrapper validates bearer
 tokens and the OpenAPI generator emits `components.securitySchemes` plus per-route
 `security` requirements.
 
-## `sarcophagus/core/oauth2` And `sarcophagus/oauth2`
+## `sarcophagus/oauth2`
 
-`sarcophagus/core/oauth2` is the protocol core. It implements the client
-credentials grant and resource-server validation over Sarcophagus bearer tokens.
+`sarcophagus/oauth2` is the main facade. The implementation is split into:
+
+- `sarcophagus/oauth2/core` for protocol logic such as token issuance,
+  authorization-code exchange, and resource-server validation.
+- `sarcophagus/oauth2/common` for typed API payloads, callbacks, and error
+  response helpers.
+- `sarcophagus/oauth2/mummy_support` for raw Mummy handlers, router registration,
+  and route-wrapping macros.
+
 
 Typical setup:
 
@@ -399,17 +406,20 @@ let storedHash = hashSecret("client-secret", policy)
 doAssert verifySecret("client-secret", storedHash, policy)
 ```
 
-## `sarcophagus/security/oauth2_hashed_clients`
+## `sarcophagus/oauth2/hashed_clients`
 
-`sarcophagus/security/oauth2_hashed_clients` adds reusable OAuth2 client
+`sarcophagus/oauth2/hashed_clients` adds reusable OAuth2 client
 credential plumbing for applications that store hashed client secrets instead of
 plaintext secrets. Storage is callback-based, so an application can back it with
 SQLite, Postgres, flat files, or another store.
 
+The older `sarcophagus/security/oauth2_hashed_clients` import path remains as a
+compatibility facade.
+
 For setup tools, seed a client and persist the resulting `HashedOAuth2Client`:
 
 ```nim
-import sarcophagus/security/oauth2_hashed_clients
+import sarcophagus/oauth2/hashed_clients
 
 let credentials = seedHashedOAuth2Client(
   proc(client: HashedOAuth2Client) {.gcsafe.} =

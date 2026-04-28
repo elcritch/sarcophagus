@@ -3,7 +3,7 @@ import std/macros
 import mummy
 
 import ./core/tapis_security
-from ./oauth2 import requireOAuth2BearerAuth
+from ./oauth2/mummy_support import requireOAuth2BearerAuth
 
 export tapis_security
 

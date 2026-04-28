@@ -1,6 +1,6 @@
 import std/json
 
-import ./oauth2
+import ../oauth2/core
 
 type
   ApiSecurityKind* = enum

@@ -2,7 +2,7 @@ import std/[httpclient, json, options, random, strutils, unittest]
 
 import mummy
 
-import sarcophagus/[core/jwt_bearer_tokens, core/oauth2, tapis]
+import sarcophagus/[core/jwt_bearer_tokens, oauth2/core, tapis]
 from sarcophagus/oauth2 import OAuth2User
 
 type
