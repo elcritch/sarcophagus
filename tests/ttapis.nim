@@ -86,6 +86,11 @@ proc readFlatItem(
     id: id, name: "flat-read-" & $id, count: 1, verbose: verbose.get(false), mode: ""
   )
 
+proc createAddedItem(
+    body: ItemBody
+): ItemOut {.tapi(post, "/added-items", summary = "Create added item").} =
+  ItemOut(id: 77, name: body.name, count: body.count, verbose: false, mode: "")
+
 proc getNamedTupleItem(
     params: Params[tuple[id: int, verbose: Option[bool]]]
 ): ItemOut {.gcsafe.} =
@@ -183,11 +188,28 @@ proc buildApi(includeStackTraces = false): ApiRouter =
   )
   api.get("/flat-items/@id", getFlatItem, summary = "Get flat item")
   api.add(readFlatItem)
+  api.add(
+    createAddedItem,
+    request = apiRequestDoc(
+      examples = {
+        "added": apiExample(
+          summary = "Added item request", value = %*{"name": "added", "count": 7}
+        )
+      }
+    ),
+  )
   api.post(
     "/items",
     createItem,
     summary = "Create item",
     responseStatus = 201,
+    request = apiRequestDoc(
+      examples = {
+        "create": apiExample(
+          summary = "Create item request", value = %*{"name": "probe", "count": 3}
+        )
+      }
+    ),
     responses = {
       201: apiResponseDoc(
         description = "Created item response",
@@ -512,6 +534,10 @@ suite "typed mummy tapis":
 
       let postOperation = spec["paths"]["/items"]["post"]
       check postOperation["requestBody"]["required"].getBool() == true
+      check postOperation["requestBody"]["content"]["application/json"].hasKey("schema")
+      check postOperation["requestBody"]["content"]["application/json"]["examples"][
+        "create"
+      ]["summary"].getStr() == "Create item request"
       check postOperation["responses"].hasKey("201")
       let createdResponse = postOperation["responses"]["201"]
       check createdResponse["description"].getStr() == "Created item response"
@@ -526,6 +552,11 @@ suite "typed mummy tapis":
       check readResponse["content"]["application/json"]["examples"]["read"]["value"][
         "name"
       ].getStr() == "read-8"
+
+      let addedOperation = spec["paths"]["/added-items"]["post"]
+      check addedOperation["requestBody"]["content"]["application/json"]["examples"][
+        "added"
+      ]["value"]["count"].getInt() == 7
 
       let bulkOperation = spec["paths"]["/bulk-items/{id}"]["post"]
       check bulkOperation["parameters"][0]["name"].getStr() == "id"

@@ -200,6 +200,17 @@ when isMainModule:
     summary = "Create a pet",
     tags = ["pets"],
     responseStatus = 201,
+    request = apiRequestDoc(
+      examples = {
+        "cat": apiExample(
+          summary = "Create a cat",
+          value = %*{"name": "Ada", "species": "cat", "age": 4},
+        ),
+        "dog": apiExample(
+          summary = "Create a dog", value = %*{"name": "Grace", "species": "dog"}
+        ),
+      }
+    ),
     responses = {
       201: apiResponseDoc(
         description = "Pet created",

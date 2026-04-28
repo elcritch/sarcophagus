@@ -16,12 +16,18 @@ type
     example*: JsonNode
     examples*: seq[(string, ApiExample)]
 
+  ApiRequestDoc* = object
+    contentType*: string
+    example*: JsonNode
+    examples*: seq[(string, ApiExample)]
+
   EndpointMeta* = object
     summary*: string
     description*: string
     operationId*: string
     tags*: seq[string]
     responseStatus*: int
+    request*: ApiRequestDoc
     responses*: seq[(int, ApiResponseDoc)]
     security*: ApiSecurity
 
@@ -48,12 +54,20 @@ proc apiResponseDoc*(
     examples: @examples,
   )
 
+proc apiRequestDoc*(
+    contentType = "application/json",
+    example: JsonNode = nil,
+    examples: openArray[(string, ApiExample)] = [],
+): ApiRequestDoc =
+  ApiRequestDoc(contentType: contentType, example: example, examples: @examples)
+
 proc endpointMeta*(
     summary = "",
     description = "",
     operationId = "",
     tags: openArray[string] = [],
     responseStatus = 200,
+    request = apiRequestDoc(),
     responses: openArray[(int, ApiResponseDoc)] = [],
     security = noSecurity(),
 ): EndpointMeta =
@@ -63,6 +77,7 @@ proc endpointMeta*(
     operationId: operationId,
     tags: @tags,
     responseStatus: responseStatus,
+    request: request,
     responses: @responses,
     security: security,
   )
@@ -272,6 +287,28 @@ proc apiExampleJson(example: ApiExample): JsonNode =
   if example.externalValue.len > 0:
     result["externalValue"] = %example.externalValue
 
+proc applyExamples(
+    mediaType: JsonNode, example: JsonNode, examples: seq[(string, ApiExample)]
+) =
+  if example != nil:
+    mediaType["example"] = example
+  if examples.len > 0:
+    var examplesJson = newJObject()
+    for (name, example) in examples:
+      examplesJson[name] = apiExampleJson(example)
+    mediaType["examples"] = examplesJson
+
+proc applyRequestDoc(requestBody: JsonNode, doc: ApiRequestDoc) =
+  if doc.example == nil and doc.examples.len == 0:
+    return
+
+  if "content" notin requestBody:
+    requestBody["content"] = newJObject()
+  if doc.contentType notin requestBody["content"]:
+    requestBody["content"][doc.contentType] = newJObject()
+
+  requestBody["content"][doc.contentType].applyExamples(doc.example, doc.examples)
+
 proc applyResponseDoc(response: JsonNode, doc: ApiResponseDoc) =
   if doc.description.len > 0:
     response["description"] = %doc.description
@@ -285,13 +322,7 @@ proc applyResponseDoc(response: JsonNode, doc: ApiResponseDoc) =
     response["content"][doc.contentType] = newJObject()
 
   let mediaType = response["content"][doc.contentType]
-  if doc.example != nil:
-    mediaType["example"] = doc.example
-  if doc.examples.len > 0:
-    var examples = newJObject()
-    for (name, example) in doc.examples:
-      examples[name] = apiExampleJson(example)
-    mediaType["examples"] = examples
+  mediaType.applyExamples(doc.example, doc.examples)
 
 proc applyResponseDocs(responses: JsonNode, docs: openArray[(int, ApiResponseDoc)]) =
   for (statusCode, doc) in docs:
@@ -332,6 +363,7 @@ proc endpointOperation*[In, Out](
   if hasRequestBody(source, In):
     result["requestBody"] =
       %*{"required": true, "content": contentSchema(requestBodySchema(In))}
+    result["requestBody"].applyRequestDoc(meta.request)
 
   result["responses"] =
     %*{
@@ -384,6 +416,7 @@ proc endpointOperationWithParamsAndBody*[Body, Out](
   result = endpointOperationWithParams(httpMethod, path, meta, parameters, Out)
   result["requestBody"] =
     %*{"required": true, "content": contentSchema(requestBodySchema(Body))}
+  result["requestBody"].applyRequestDoc(meta.request)
 
 proc addEndpoint*[In, Out](
     paths: JsonNode,

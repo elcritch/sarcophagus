@@ -828,6 +828,7 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       operationId: string = "",
       tags: openArray[string] = [],
       responseStatus: int = 200,
+      request: ApiRequestDoc = apiRequestDoc(),
       responses: openArray[(int, ApiResponseDoc)] = [],
       security: ApiSecurity = noSecurity(),
   ): untyped =
@@ -839,7 +840,8 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       handler,
       source,
       endpointMeta(
-        summary, description, operationId, tags, responseStatus, responses, security
+        summary, description, operationId, tags, responseStatus, request, responses,
+        security,
       ),
     )
 
@@ -910,7 +912,11 @@ proc staticTagsArg(node: NimNode): NimNode =
     result = node.copyNimTree()
 
 macro add*(
-    api: typed, handler: typed, responses: typed = [], security: typed = noSecurity()
+    api: typed,
+    handler: typed,
+    security: typed = noSecurity(),
+    request: typed = apiRequestDoc(),
+    responses: typed = [],
 ): untyped =
   ## Registers a proc annotated with the `tapi` pragma.
   ##
@@ -952,8 +958,9 @@ macro add*(
     operationId,
     tags,
     responseStatus,
-    responses,
-    security,
+    newTree(nnkExprEqExpr, ident"request", request),
+    newTree(nnkExprEqExpr, ident"responses", responses),
+    newTree(nnkExprEqExpr, ident"security", security),
   )
 
 template options*(
@@ -965,6 +972,7 @@ template options*(
     operationId = "",
     tags: openArray[string] = [],
     responseStatus = 200,
+    request: ApiRequestDoc = apiRequestDoc(),
     responses: openArray[(int, ApiResponseDoc)] = [],
     security: ApiSecurity = noSecurity(),
 ): untyped =
@@ -976,7 +984,8 @@ template options*(
     handler,
     adsNone,
     endpointMeta(
-      summary, description, operationId, tags, responseStatus, responses, security
+      summary, description, operationId, tags, responseStatus, request, responses,
+      security,
     ),
   )
 
