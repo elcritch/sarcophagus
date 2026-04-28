@@ -1,4 +1,4 @@
-import std/[httpclient, json, random, unittest]
+import std/[httpclient, json, options, random, strutils, unittest]
 
 import mummy
 import mummy/routers
@@ -45,6 +45,58 @@ proc testConfig(): OAuth2Config =
     ],
     accessTokenTtlSeconds = 900,
   )
+
+proc userLoginConfig(): OAuth2Config =
+  let tokenConfig = initBearerTokenConfig(
+    issuer = "sam-sync-server",
+    audience = "sam-sync-api",
+    keys = [SigningKey(kid: "v1", secret: "secret-a")],
+  )
+
+  initOAuth2Config(
+    realm = "sam-sync",
+    tokenConfig = tokenConfig,
+    clients = [
+      initOAuth2Client(
+        clientId = "browser-client",
+        clientSecret = "",
+        subject = "browser-client",
+        allowedScopes = ["sync:read", "sync:write"],
+        defaultScopes = ["sync:read"],
+        redirectUris = ["http://client.example/callback"],
+        requirePkce = true,
+      )
+    ],
+    accessTokenTtlSeconds = 900,
+  )
+
+proc saveCallback(
+    store: InMemoryOAuth2AuthorizationCodeStore
+): OAuth2AuthorizationCodeSaver =
+  result = proc(authorizationCode: OAuth2AuthorizationCode) {.gcsafe.} =
+    store.save(authorizationCode)
+
+proc consumeCallback(
+    store: InMemoryOAuth2AuthorizationCodeStore
+): OAuth2AuthorizationCodeConsumer =
+  result = proc(code: string): Option[OAuth2AuthorizationCode] {.gcsafe.} =
+    store.consume(code)
+
+proc currentUser(request: Request): Option[OAuth2User] {.gcsafe.} =
+  discard request
+  some(OAuth2User(subject: "user-123", scopes: @["sync:read"]))
+
+proc codeFromLocation(location: string): string =
+  let marker = "code="
+  let start = location.find(marker)
+  if start < 0:
+    return ""
+  let valueStart = start + marker.len
+  let nextParam = location.find("&", valueStart)
+  if nextParam < 0:
+    result = location[valueStart .. ^1]
+  else:
+    result = location[valueStart ..< nextParam]
 
 suite "mummy oauth2":
   test "protected api routes enforce bearer auth semantics":
@@ -317,3 +369,72 @@ suite "mummy oauth2":
     check response.headers["WWW-Authenticate"].len > 0
     let body = parseJson(response.body)
     check body["error"]["error"].getStr() == "insufficient_scope"
+
+  test "authorization-code endpoints issue user tokens for api routes":
+    randomize()
+    let config = userLoginConfig()
+    let store = newInMemoryOAuth2AuthorizationCodeStore()
+    let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+
+    var router: Router
+    router.registerOAuth2AuthorizationCode(
+      config,
+      store.saveCallback(),
+      store.consumeCallback(),
+      currentUser,
+      loginUrl = "/login",
+    )
+    router.get("/claims", oauth2(claimsHandler, config, ["sync:read"]))
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(maxRedirects = 0, timeout = 5_000)
+    defer:
+      client.close()
+
+    let baseUrl = "http://127.0.0.1:" & $portNumber
+    let authorize = client.get(
+      baseUrl & "/oauth/authorize?response_type=code&client_id=browser-client" &
+        "&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback&scope=sync%3Aread" &
+        "&state=state-1&code_challenge=" & pkceS256Challenge(verifier) &
+        "&code_challenge_method=S256"
+    )
+    check authorize.code.int == 302
+    let location = authorize.headers["Location"]
+    check location.startsWith("http://client.example/callback?")
+    check location.find("state=state-1") >= 0
+    let code = location.codeFromLocation()
+    check code.len > 0
+
+    let tokenResponse = client.request(
+      baseUrl & "/oauth/token",
+      httpMethod = HttpPost,
+      headers = newHttpHeaders({"Content-Type": "application/x-www-form-urlencoded"}),
+      body =
+        "grant_type=authorization_code&client_id=browser-client&code=" & code &
+        "&redirect_uri=http%3A%2F%2Fclient.example%2Fcallback" & "&code_verifier=" &
+        verifier,
+    )
+    check tokenResponse.code.int == 200
+    let tokenBody = parseJson(tokenResponse.body)
+
+    let claimsResponse = client.request(
+      baseUrl & "/claims",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders(
+        {"Authorization": "Bearer " & tokenBody["access_token"].getStr()}
+      ),
+    )
+    check claimsResponse.code.int == 200
+    check parseJson(claimsResponse.body)["subject"].getStr() == "user-123"

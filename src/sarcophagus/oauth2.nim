@@ -1,4 +1,4 @@
-import std/[json, macros]
+import std/[json, macros, options, strutils]
 
 import mummy
 import mummy/routers
@@ -9,6 +9,16 @@ import ./core/oauth2
 type OAuth2ProtectedRequestHandler* =
   proc(request: Request, claims: BearerTokenClaims) {.gcsafe.}
   ## Mummy handler shape for OAuth2-protected endpoints that need JWT claims.
+
+type
+  OAuth2User* = object
+    ## Logged-in browser user returned by an application-owned session callback.
+    subject*: string
+    displayName*: string
+    scopes*: seq[string]
+
+  OAuth2CurrentUserLoader* = proc(request: Request): Option[OAuth2User] {.gcsafe.}
+    ## Callback used by `/oauth/authorize` to read the current logged-in user.
 
 const routeRegistrationNames =
   ["addRoute", "get", "head", "post", "put", "delete", "options", "patch"]
@@ -59,6 +69,32 @@ proc defaultOAuth2TokenErrorResponder*(
 
   request.respondJson(failure.statusCode, body, headers)
 
+proc defaultOAuth2AuthorizeErrorResponder*(
+    request: Request, failure: OAuth2Failure
+) {.gcsafe.} =
+  ## Writes the default JSON response for OAuth2 authorization endpoint failures.
+  let body =
+    if failure.error.len == 0:
+      $(%*{"status": "error"})
+    else:
+      $(%*{"status": "error", "error": failure.toJson()})
+  request.respondJson(failure.statusCode, body, default(HttpHeaders))
+
+proc appendQueryParam(url, key, value: string): string =
+  result = url
+  if '?' in result:
+    result.add('&')
+  else:
+    result.add('?')
+  result.add(encodeQueryComponent(key))
+  result.add('=')
+  result.add(encodeQueryComponent(value))
+
+proc redirect(request: Request, location: string, statusCode = 302) =
+  var headers: HttpHeaders
+  headers["Location"] = location
+  request.respond(statusCode, headers)
+
 proc oauth2TokenHandler*(
     config: OAuth2Config,
     onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
@@ -94,11 +130,125 @@ proc oauth2TokenHandler*(
     headers["Pragma"] = "no-cache"
     request.respondJson(200, $tokenResult.response.toJson(), headers)
 
+proc oauth2TokenHandler*(
+    config: OAuth2Config,
+    consumeAuthorizationCode: OAuth2AuthorizationCodeConsumer,
+    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
+      defaultOAuth2TokenErrorResponder,
+): RequestHandler =
+  ## Returns a Mummy handler for client-credentials and authorization-code tokens.
+  return proc(request: Request) {.gcsafe.} =
+    if request.httpMethod != "POST":
+      var headers: HttpHeaders
+      headers["Allow"] = "POST"
+      request.respondJson(
+        405, $(%*{"status": "error", "error": {"error": "invalid_request"}}), headers
+      )
+      return
+
+    let tokenResult = issueOAuth2Token(
+      config,
+      consumeAuthorizationCode,
+      request.headers["Authorization"],
+      request.headers["Content-Type"],
+      request.body,
+    )
+
+    if not tokenResult.ok:
+      onError(request, tokenResult.failure)
+      return
+
+    var headers: HttpHeaders
+    headers["Cache-Control"] = "no-store"
+    headers["Pragma"] = "no-cache"
+    request.respondJson(200, $tokenResult.response.toJson(), headers)
+
 proc registerOAuth2*(
     router: var Router, config: OAuth2Config, tokenPath = "/oauth/token"
 ) =
   ## Mounts `oauth2TokenHandler(config)` on `router.post(tokenPath)`.
   router.post(tokenPath, oauth2TokenHandler(config))
+
+proc oauth2AuthorizeHandler*(
+    config: OAuth2Config,
+    saveAuthorizationCode: OAuth2AuthorizationCodeSaver,
+    currentUser: OAuth2CurrentUserLoader,
+    loginUrl = "/login",
+    onError: proc(request: Request, failure: OAuth2Failure) {.gcsafe.} =
+      defaultOAuth2AuthorizeErrorResponder,
+): RequestHandler =
+  ## Returns a browser authorization endpoint for OAuth2 authorization-code login.
+  ##
+  ## The handler expects an application-owned session callback. When no user is
+  ## logged in, it redirects to `loginUrl` with a `next` parameter.
+  return proc(request: Request) {.gcsafe.} =
+    if request.httpMethod != "GET":
+      var headers: HttpHeaders
+      headers["Allow"] = "GET"
+      request.respondJson(
+        405, $(%*{"status": "error", "error": {"error": "invalid_request"}}), headers
+      )
+      return
+
+    let user = currentUser(request)
+    if user.isNone:
+      request.redirect(loginUrl.appendQueryParam("next", request.uri))
+      return
+
+    let responseType = request.queryParams["response_type"]
+    if responseType != "code":
+      onError(
+        request,
+        OAuth2Failure(
+          statusCode: 400,
+          error: "unsupported_response_type",
+          errorDescription: "Only response_type=code is supported",
+        ),
+      )
+      return
+
+    let authorizeResult = issueAuthorizationCode(
+      config,
+      saveAuthorizationCode,
+      clientId = request.queryParams["client_id"],
+      redirectUri = request.queryParams["redirect_uri"],
+      subject = user.get().subject,
+      requestedScopeParam = request.queryParams["scope"],
+      codeChallenge = request.queryParams["code_challenge"],
+      codeChallengeMethod = request.queryParams["code_challenge_method"],
+      userAllowedScopes = user.get().scopes,
+    )
+
+    if not authorizeResult.ok:
+      onError(request, authorizeResult.failure)
+      return
+
+    var location = authorizeResult.authorizationCode.redirectUri.appendQueryParam(
+      "code", authorizeResult.authorizationCode.code
+    )
+    let state = request.queryParams["state"]
+    if state.len > 0:
+      location = location.appendQueryParam("state", state)
+    request.redirect(location)
+
+proc registerOAuth2AuthorizationCode*(
+    router: var Router,
+    config: OAuth2Config,
+    saveAuthorizationCode: OAuth2AuthorizationCodeSaver,
+    consumeAuthorizationCode: OAuth2AuthorizationCodeConsumer,
+    currentUser: OAuth2CurrentUserLoader,
+    tokenPath = "/oauth/token",
+    authorizationPath = "/oauth/authorize",
+    loginUrl = "/login",
+) =
+  ## Mounts `/oauth/authorize` and an extended `/oauth/token` endpoint.
+  ##
+  ## Existing client-credentials requests continue to work on the token endpoint.
+  router.get(
+    authorizationPath,
+    oauth2AuthorizeHandler(config, saveAuthorizationCode, currentUser, loginUrl),
+  )
+  router.post(tokenPath, oauth2TokenHandler(config, consumeAuthorizationCode))
 
 proc validateOAuth2BearerRequest*(
     request: Request, config: OAuth2Config, requiredScopes: openArray[string] = []

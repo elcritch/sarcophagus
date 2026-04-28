@@ -286,3 +286,17 @@ suite "typed mummy tapis security":
 
       let writeScopedOperation = spec["paths"]["/write-scoped-items/{id}"]["get"]
       check writeScopedOperation["security"][0]["oauth2"][0].getStr() == "items:write"
+
+  test "emits authorization-code oauth2 security metadata":
+    let config = testConfig()
+    var components = newJObject()
+    components.addOpenApiSecuritySchemes(
+      oauth2AuthorizationCode(config, ["items:read"])
+    )
+
+    let scheme = components["securitySchemes"]["oauth2"]
+    check scheme["type"].getStr() == "oauth2"
+    check scheme["flows"]["authorizationCode"]["authorizationUrl"].getStr() ==
+      "/oauth/authorize"
+    check scheme["flows"]["authorizationCode"]["tokenUrl"].getStr() == "/oauth/token"
+    check scheme["flows"]["authorizationCode"]["scopes"].hasKey("items:read")

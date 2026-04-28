@@ -1,4 +1,4 @@
-import std/[json, strutils, unittest]
+import std/[json, options, strutils, unittest]
 
 import sarcophagus/[core/jwt_bearer_tokens, core/oauth2]
 
@@ -23,6 +23,42 @@ proc testConfig(): OAuth2Config =
     ],
     accessTokenTtlSeconds = 900,
   )
+
+proc userLoginConfig(): OAuth2Config =
+  let tokenConfig = initBearerTokenConfig(
+    issuer = "sam-sync-server",
+    audience = "sam-sync-api",
+    keys = [SigningKey(kid: "v1", secret: "secret-a")],
+  )
+
+  initOAuth2Config(
+    realm = "sam-sync",
+    tokenConfig = tokenConfig,
+    clients = [
+      initOAuth2Client(
+        clientId = "browser-client",
+        clientSecret = "",
+        subject = "browser-client",
+        allowedScopes = ["sync:read", "sync:write"],
+        defaultScopes = ["sync:read"],
+        redirectUris = ["https://client.example/callback"],
+        requirePkce = true,
+      )
+    ],
+    accessTokenTtlSeconds = 900,
+  )
+
+proc saveCallback(
+    store: InMemoryOAuth2AuthorizationCodeStore
+): OAuth2AuthorizationCodeSaver =
+  result = proc(authorizationCode: OAuth2AuthorizationCode) {.gcsafe.} =
+    store.save(authorizationCode)
+
+proc consumeCallback(
+    store: InMemoryOAuth2AuthorizationCodeStore
+): OAuth2AuthorizationCodeConsumer =
+  result = proc(code: string): Option[OAuth2AuthorizationCode] {.gcsafe.} =
+    store.consume(code)
 
 suite "oauth2 client credentials":
   test "issues a bearer token for a valid basic-auth request":
@@ -192,3 +228,112 @@ suite "oauth2 client credentials":
     check scopeClaimsToScopes({"sync": "read"}) == @["sync:read"]
     check scopeClaimsToScopes({"sync": "read", "user": "admin"}) ==
       @["sync:read", "user:admin"]
+
+suite "oauth2 authorization code":
+  test "issues and exchanges authorization codes with pkce":
+    let config = userLoginConfig()
+    let store = newInMemoryOAuth2AuthorizationCodeStore()
+    let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+    let codeResult = issueAuthorizationCode(
+      config,
+      store.saveCallback(),
+      clientId = "browser-client",
+      redirectUri = "https://client.example/callback",
+      subject = "user-123",
+      requestedScopeParam = "sync:read",
+      codeChallenge = pkceS256Challenge(verifier),
+      codeChallengeMethod = "S256",
+      userAllowedScopes = ["sync:read"],
+      now = 1_700_000_000,
+      code = "auth-code-1",
+    )
+
+    check codeResult.ok
+    check codeResult.authorizationCode.subject == "user-123"
+    check codeResult.authorizationCode.scopes == @["sync:read"]
+
+    let tokenResult = issueOAuth2Token(
+      config,
+      store.consumeCallback(),
+      authorizationHeader = "",
+      contentType = "application/x-www-form-urlencoded",
+      requestBody =
+        "grant_type=authorization_code&client_id=browser-client" &
+        "&code=auth-code-1&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback" &
+        "&code_verifier=" & verifier,
+      now = 1_700_000_010,
+    )
+
+    check tokenResult.ok
+    check tokenResult.response.tokenType == "Bearer"
+    check tokenResult.response.scope == "sync:read"
+
+    let validation = validateOAuth2BearerToken(
+      config,
+      "Bearer " & tokenResult.response.accessToken,
+      ["sync:read"],
+      now = 1_700_000_011,
+    )
+    check validation.ok
+    check validation.claims.subject == "user-123"
+
+    let replay = issueOAuth2Token(
+      config,
+      store.consumeCallback(),
+      authorizationHeader = "",
+      contentType = "application/x-www-form-urlencoded",
+      requestBody =
+        "grant_type=authorization_code&client_id=browser-client" &
+        "&code=auth-code-1&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback" &
+        "&code_verifier=" & verifier,
+      now = 1_700_000_012,
+    )
+    check not replay.ok
+    check replay.failure.error == "invalid_grant"
+
+  test "rejects invalid user scopes and pkce verifiers":
+    let config = userLoginConfig()
+    let store = newInMemoryOAuth2AuthorizationCodeStore()
+    let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+
+    let denied = issueAuthorizationCode(
+      config,
+      store.saveCallback(),
+      clientId = "browser-client",
+      redirectUri = "https://client.example/callback",
+      subject = "user-123",
+      requestedScopeParam = "sync:write",
+      codeChallenge = pkceS256Challenge(verifier),
+      codeChallengeMethod = "S256",
+      userAllowedScopes = ["sync:read"],
+    )
+    check not denied.ok
+    check denied.failure.error == "invalid_scope"
+
+    let codeResult = issueAuthorizationCode(
+      config,
+      store.saveCallback(),
+      clientId = "browser-client",
+      redirectUri = "https://client.example/callback",
+      subject = "user-123",
+      requestedScopeParam = "sync:read",
+      codeChallenge = pkceS256Challenge(verifier),
+      codeChallengeMethod = "S256",
+      now = 1_700_000_000,
+      code = "auth-code-2",
+    )
+    check codeResult.ok
+
+    let invalidPkce = issueOAuth2Token(
+      config,
+      store.consumeCallback(),
+      authorizationHeader = "",
+      contentType = "application/x-www-form-urlencoded",
+      requestBody =
+        "grant_type=authorization_code&client_id=browser-client" &
+        "&code=auth-code-2&redirect_uri=https%3A%2F%2Fclient.example%2Fcallback" &
+        "&code_verifier=wrong-verifier-wrong-verifier-wrong-verifier-wrong",
+      now = 1_700_000_010,
+    )
+    check not invalidPkce.ok
+    check invalidPkce.failure.error == "invalid_grant"
