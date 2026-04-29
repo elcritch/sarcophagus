@@ -79,6 +79,32 @@ proc getPetFlat(id: int, includeSold: Option[bool]): Pet {.gcsafe.} =
 
   raiseApiError(404, "pet not found", "pet_not_found", details = %*{"id": id})
 
+let createPetRequestDocs = block:
+  apiRequestDocs:
+    examples:
+      "cat":
+        summary = "Create a cat"
+        value = CreatePetBody(name: "Ada", species: "cat", age: some(4))
+      "dog":
+        summary = "Create a dog"
+        value = CreatePetBody(name: "Grace", species: "dog", age: none(int))
+
+let createPetResponseDocs = block:
+  apiResponseDocs:
+    http(201):
+      description = "Pet created"
+      examples:
+        "cat":
+          summary = "Create a cat"
+          value = Pet(
+            id: 100, name: "Ada", species: "cat", status: petAvailable, age: some(4)
+          )
+        "dog":
+          summary = "Create a dog"
+          value = Pet(
+            id: 100, name: "Grace", species: "dog", status: petAvailable, age: none(int)
+          )
+
 proc createPet(
     body: CreatePetBody
 ): ApiResponse[Pet] {.
@@ -88,38 +114,8 @@ proc createPet(
       summary = "Create a pet",
       tags = ["pets"],
       responseStatus = 201,
-      request = block:
-        apiRequestDocs:
-          examples:
-            "cat":
-              summary = "Create a cat"
-              value = CreatePetBody(name: "Ada", species: "cat", age: some(4))
-            "dog":
-              summary = "Create a dog"
-              value = CreatePetBody(name: "Grace", species: "dog", age: none(int)),
-      responses = block:
-        apiResponseDocs:
-          http(201):
-            description = "Pet created"
-            examples:
-              "cat":
-                summary = "Create a cat"
-                value = Pet(
-                  id: 100,
-                  name: "Ada",
-                  species: "cat",
-                  status: petAvailable,
-                  age: some(4),
-                )
-              "dog":
-                summary = "Create a dog"
-                value = Pet(
-                  id: 100,
-                  name: "Grace",
-                  species: "dog",
-                  status: petAvailable,
-                  age: none(int),
-                ),
+      request = createPetRequestDocs,
+      responses = createPetResponseDocs,
     )
 .} =
   var headers: HttpHeaders
