@@ -197,6 +197,26 @@ api.mountOpenApi()
 newServer(api.router).serve(Port(8080), address = "127.0.0.1")
 ```
 
+### Raw HTML Responses
+
+Use `RawResponse["text/html"]` when a typed TAPIS handler should return HTML or
+another pre-encoded string body instead of JSON encoding:
+
+```nim
+proc docs(): RawResponse["text/html"] {.gcsafe.} =
+  htmlResponse("""
+<!DOCTYPE html>
+<html>
+<head><title>API Docs</title></head>
+<body><div id="redoc"></div></body>
+</html>""")
+
+api.get("/docs", docs, summary = "API docs")
+```
+
+`rawResponse["content/type"](...)` and `textResponse(...)` are also available
+for other string response types.
+
 By default, TAPIS supports JSON. Compile with `-d:feature.sarcophagus.cbor` or
 `-d:feature.sarcophagus.msgpack` to enable CBOR or MessagePack request/response
 negotiation.
