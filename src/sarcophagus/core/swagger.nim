@@ -77,16 +77,11 @@ proc fieldValue*(node: NimNode): tuple[name: string, value: NimNode] =
   (node[0].nodeName(), node[1].copyNimTree())
 
 proc parseApiExampleBlock*(node: NimNode): NimNode =
-  if node.kind != nnkCall or node[0].nodeName() != "apiExample":
-    error("expected apiExample(name): block", node)
-  if node.len notin {2, 3}:
-    error("expected apiExample(name): block", node)
+  if node.kind != nnkCall or node.len != 2 or
+      node[0].kind notin {nnkStrLit .. nnkTripleStrLit}:
+    error("expected \"name\": block", node)
 
-  var name: NimNode =
-    if node.len == 3:
-      node[1].copyNimTree()
-    else:
-      nil
+  let name = node[0].copyNimTree()
   var summary: NimNode
   var description: NimNode
   var value: NimNode
@@ -96,8 +91,6 @@ proc parseApiExampleBlock*(node: NimNode): NimNode =
   for child in body:
     let field = child.fieldValue()
     case field.name
-    of "name":
-      name = field.value
     of "summary":
       summary = field.value
     of "description":
@@ -107,10 +100,7 @@ proc parseApiExampleBlock*(node: NimNode): NimNode =
     of "externalValue":
       externalValue = field.value
     else:
-      error("unknown apiExample field: " & field.name, child)
-
-  if name.isNil:
-    error("apiExample block requires apiExample(name):", node)
+      error("unknown example field: " & field.name, child)
 
   let call = newCall(bindSym"apiExample")
   if not summary.isNil:
@@ -187,7 +177,7 @@ macro apiResponseDocs*(body: untyped): untyped =
   ##       http(201):
   ##         description = "Created"
   ##         examples:
-  ##           apiExample("created"):
+  ##           "created":
   ##             value = MyResponse(...)
   result = parseApiResponseDocsBlock(body)
 
@@ -198,7 +188,7 @@ macro apiRequestDocs*(body: untyped): untyped =
   ##   request = block:
   ##     apiRequestDocs:
   ##       examples:
-  ##         apiExample("create"):
+  ##         "create":
   ##           value = MyRequest(...)
   result = parseApiRequestDocBlock(body)
 

@@ -91,10 +91,10 @@ proc createPet(
       request = block:
         apiRequestDocs:
           examples:
-            apiExample("cat"):
+            "cat":
               summary = "Create a cat"
               value = CreatePetBody(name: "Ada", species: "cat", age: some(4))
-            apiExample("dog"):
+            "dog":
               summary = "Create a dog"
               value = CreatePetBody(name: "Grace", species: "dog", age: none(int)),
       responses = block:
@@ -102,7 +102,7 @@ proc createPet(
           http(201):
             description = "Pet created"
             examples:
-              apiExample("cat"):
+              "cat":
                 summary = "Create a cat"
                 value = Pet(
                   id: 100,
@@ -111,7 +111,7 @@ proc createPet(
                   status: petAvailable,
                   age: some(4),
                 )
-              apiExample("dog"):
+              "dog":
                 summary = "Create a dog"
                 value = Pet(
                   id: 100,
@@ -258,7 +258,7 @@ when isMainModule:
     request = block:
       apiRequestDocs:
         examples:
-          apiExample("cat"):
+          "cat":
             summary = "Create a cat"
             value = CreatePetBody(name: "Ada", species: "cat", age: some(4)),
     responses = block:
@@ -266,7 +266,7 @@ when isMainModule:
         http(201):
           description = "Pet created"
           examples:
-            apiExample("cat"):
+            "cat":
               summary = "Created cat"
               value = Pet(
                 id: 101, name: "Ada", species: "cat", status: petAvailable, age: some(4)

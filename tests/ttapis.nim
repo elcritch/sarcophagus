@@ -231,10 +231,10 @@ proc buildApi(includeStackTraces = false): ApiRouter =
     request = block:
       apiRequestDocs:
         examples:
-          apiExample("create"):
+          "create":
             summary = "Create item request"
             value = ItemBody(name: "probe", count: 3)
-          apiExample("raw"):
+          "raw":
             summary = "Raw JSON request"
             value = %*{"name": "raw", "count": 5},
     responses = block:
@@ -242,10 +242,10 @@ proc buildApi(includeStackTraces = false): ApiRouter =
         http(201):
           description = "Created item response"
           examples:
-            apiExample("created"):
+            "created":
               summary = "Created item"
               value = ItemOut(id: 42, name: "probe", count: 3, verbose: false, mode: "")
-            apiExample("raw"):
+            "raw":
               summary = "Raw JSON response"
               value =
                 %*{"id": 43, "name": "raw", "count": 5, "verbose": false, "mode": ""},

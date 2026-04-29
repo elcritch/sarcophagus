@@ -154,7 +154,7 @@ api.post(
   request = block:
     apiRequestDocs:
       examples:
-        apiExample("create"):
+        "create":
           summary = "Create item request"
           value = CreateItemBody(name: "probe", count: 3),
   responses = block:
@@ -162,7 +162,7 @@ api.post(
       http(201):
         description = "Created item response"
         examples:
-          apiExample("created"):
+          "created":
             summary = "Created item"
             value = ItemOut(id: 42, name: "probe", count: 3),
 )
