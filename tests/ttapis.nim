@@ -228,32 +228,27 @@ proc buildApi(includeStackTraces = false): ApiRouter =
     createItem,
     summary = "Create item",
     responseStatus = 201,
-    request = apiRequestDoc(
-      examples = {
-        "create": apiExample(
-          summary = "Create item request", value = ItemBody(name: "probe", count: 3)
-        ),
-        "raw": apiExample(
-          summary = "Raw JSON request", value = %*{"name": "raw", "count": 5}
-        ),
-      }
-    ),
-    responses = {
-      201: apiResponseDoc(
-        description = "Created item response",
-        examples = {
-          "created": apiExample(
-            summary = "Created item",
-            value = ItemOut(id: 42, name: "probe", count: 3, verbose: false, mode: ""),
-          ),
-          "raw": apiExample(
-            summary = "Raw JSON response",
-            value =
-              %*{"id": 43, "name": "raw", "count": 5, "verbose": false, "mode": ""},
-          ),
-        },
-      )
-    },
+    request = block:
+      apiRequestDocs:
+        examples:
+          apiExample("create"):
+            summary = "Create item request"
+            value = ItemBody(name: "probe", count: 3)
+          apiExample("raw"):
+            summary = "Raw JSON request"
+            value = %*{"name": "raw", "count": 5},
+    responses = block:
+      apiResponseDocs:
+        http(201):
+          description = "Created item response"
+          examples:
+            apiExample("created"):
+              summary = "Created item"
+              value = ItemOut(id: 42, name: "probe", count: 3, verbose: false, mode: "")
+            apiExample("raw"):
+              summary = "Raw JSON response"
+              value =
+                %*{"id": 43, "name": "raw", "count": 5, "verbose": false, "mode": ""},
   )
   api.post("/bulk-items/@id", createBulkItem, summary = "Create bulk item")
   api.post("/queried-items", createQueriedItem, summary = "Create queried item")

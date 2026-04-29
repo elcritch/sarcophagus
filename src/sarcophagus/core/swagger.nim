@@ -1,4 +1,4 @@
-import std/[json, options, strutils]
+import std/[json, macros, options, strutils]
 
 import ./tapis_security
 import ./typed_api
@@ -58,6 +58,148 @@ proc apiResponseDoc*(
     example: example,
     examples: @examples,
   )
+
+proc nodeName*(node: NimNode): string =
+  case node.kind
+  of nnkIdent, nnkSym:
+    $node
+  of nnkOpenSymChoice, nnkClosedSymChoice:
+    if node.len > 0:
+      nodeName(node[0])
+    else:
+      ""
+  else:
+    ""
+
+proc fieldValue*(node: NimNode): tuple[name: string, value: NimNode] =
+  if node.kind != nnkAsgn or node.len != 2:
+    error("expected name = value", node)
+  (node[0].nodeName(), node[1].copyNimTree())
+
+proc parseApiExampleBlock*(node: NimNode): NimNode =
+  if node.kind != nnkCall or node[0].nodeName() != "apiExample":
+    error("expected apiExample(name): block", node)
+  if node.len notin {2, 3}:
+    error("expected apiExample(name): block", node)
+
+  var name: NimNode =
+    if node.len == 3:
+      node[1].copyNimTree()
+    else:
+      nil
+  var summary: NimNode
+  var description: NimNode
+  var value: NimNode
+  var externalValue: NimNode
+
+  let body = node[^1]
+  for child in body:
+    let field = child.fieldValue()
+    case field.name
+    of "name":
+      name = field.value
+    of "summary":
+      summary = field.value
+    of "description":
+      description = field.value
+    of "value":
+      value = field.value
+    of "externalValue":
+      externalValue = field.value
+    else:
+      error("unknown apiExample field: " & field.name, child)
+
+  if name.isNil:
+    error("apiExample block requires apiExample(name):", node)
+
+  let call = newCall(bindSym"apiExample")
+  if not summary.isNil:
+    call.add newTree(nnkExprEqExpr, ident"summary", summary)
+  if not description.isNil:
+    call.add newTree(nnkExprEqExpr, ident"description", description)
+  if not value.isNil:
+    call.add newTree(nnkExprEqExpr, ident"value", value)
+  if not externalValue.isNil:
+    call.add newTree(nnkExprEqExpr, ident"externalValue", externalValue)
+
+  newTree(nnkExprColonExpr, name, call)
+
+proc parseApiExamplesBlock*(node: NimNode): NimNode =
+  if node.kind != nnkCall or node.len != 2 or node[0].nodeName() != "examples":
+    error("expected examples: block", node)
+
+  result = newTree(nnkTableConstr)
+  for child in node[1]:
+    result.add parseApiExampleBlock(child)
+
+proc parseApiRequestDocBlock*(body: NimNode): NimNode =
+  result = newCall(ident"apiRequestDoc")
+  for child in body:
+    if child.kind == nnkAsgn:
+      let field = child.fieldValue()
+      case field.name
+      of "contentType":
+        result.add newTree(nnkExprEqExpr, ident"contentType", field.value)
+      of "example":
+        result.add newTree(nnkExprEqExpr, ident"example", field.value)
+      else:
+        error("unknown apiRequestDoc field: " & field.name, child)
+    elif child.kind == nnkCall and child[0].nodeName() == "examples":
+      result.add newTree(nnkExprEqExpr, ident"examples", parseApiExamplesBlock(child))
+    else:
+      error("expected request field or examples block", child)
+
+proc parseApiResponseDocsBlock*(body: NimNode): NimNode =
+  result = newTree(nnkTableConstr)
+  for response in body:
+    if response.kind != nnkCall or response.len != 3 or response[0].nodeName() != "http":
+      error("expected http(status): block", response)
+
+    let statusCode = response[1].copyNimTree()
+    let responseDoc = newCall(bindSym"apiResponseDoc")
+    for child in response[2]:
+      if child.kind == nnkAsgn:
+        let field = child.fieldValue()
+        case field.name
+        of "description":
+          responseDoc.add newTree(nnkExprEqExpr, ident"description", field.value)
+        of "contentType":
+          responseDoc.add newTree(nnkExprEqExpr, ident"contentType", field.value)
+        of "example":
+          responseDoc.add newTree(nnkExprEqExpr, ident"example", field.value)
+        else:
+          error("unknown apiResponseDoc field: " & field.name, child)
+      elif child.kind == nnkCall and child[0].nodeName() == "examples":
+        responseDoc.add newTree(
+          nnkExprEqExpr, ident"examples", parseApiExamplesBlock(child)
+        )
+      else:
+        error("expected response field or examples block", child)
+
+    result.add newTree(nnkExprColonExpr, statusCode, responseDoc)
+
+macro apiResponseDocs*(body: untyped): untyped =
+  ## Builds response documentation metadata for TAPIS route registration.
+  ##
+  ## Example:
+  ##   responses = apiResponseDocs:
+  ##     http(201):
+  ##       description = "Created"
+  ##       examples:
+  ##         apiExample("created"):
+  ##           value = MyResponse(...)
+  result = parseApiResponseDocsBlock(body)
+
+macro apiRequestDocs*(body: untyped): untyped =
+  ## Builds request body documentation metadata for TAPIS route registration.
+  ##
+  ## Example:
+  ##   request = block:
+  ##     apiRequestDocs:
+  ##       examples:
+  ##         apiExample("create"):
+  ##           value = MyRequest(...)
+  result = parseApiRequestDocBlock(body)
 
 proc apiRequestDoc*(
     contentType = "application/json",

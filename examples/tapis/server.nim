@@ -258,27 +258,22 @@ when isMainModule:
     summary = "Create a pet with direct docs",
     tags = ["pets"],
     responseStatus = 201,
-    request = apiRequestDoc(
-      examples = {
-        "cat": apiExample(
-          summary = "Create a cat",
-          value = CreatePetBody(name: "Ada", species: "cat", age: some(4)),
-        )
-      }
-    ),
-    responses = {
-      201: apiResponseDoc(
-        description = "Pet created",
-        examples = {
-          "cat": apiExample(
-            summary = "Created cat",
-            value = Pet(
-              id: 101, name: "Ada", species: "cat", status: petAvailable, age: some(4)
-            ),
-          )
-        },
-      )
-    },
+    request = block:
+      apiRequestDocs:
+        examples:
+          apiExample("cat"):
+            summary = "Create a cat"
+            value = CreatePetBody(name: "Ada", species: "cat", age: some(4)),
+    responses = block:
+      apiResponseDocs:
+        http(201):
+          description = "Pet created"
+          examples:
+            apiExample("cat"):
+              summary = "Created cat"
+              value = Pet(
+                id: 101, name: "Ada", species: "cat", status: petAvailable, age: some(4)
+              ),
   )
   apiRouter.put("/pets/@id", updatePet, summary = "Update a pet", tags = ["pets"])
   apiRouter.delete("/pets/@id", deletePet, summary = "Delete a pet", tags = ["pets"])
