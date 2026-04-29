@@ -142,6 +142,8 @@ proc updateItem(
   ItemOut(id: input.params.id, name: input.body.name, count: input.body.count)
 ```
 
+### OpenAPI Examples
+
 Request and response examples can be added to the OpenAPI document with the
 block-style docs helpers:
 
@@ -167,6 +169,8 @@ api.post(
             value = ItemOut(id: 42, name: "probe", count: 3),
 )
 ```
+
+### Mixed Routers
 
 TAPIS routes and regular Mummy handlers can use the same router. Register raw
 Mummy handlers on `api.router` when you need lower-level control or an endpoint
