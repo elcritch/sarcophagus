@@ -1,15 +1,203 @@
-import std/[json, options, strutils]
+import std/[json, macros, options, strutils]
 
 import ./tapis_security
 import ./typed_api
 
-type EndpointMeta* = object
-  summary*: string
-  description*: string
-  operationId*: string
-  tags*: seq[string]
-  responseStatus*: int
-  security*: ApiSecurity
+type
+  ApiExample* = object
+    summary*: string
+    description*: string
+    value*: JsonNode
+    externalValue*: string
+
+  ApiResponseDoc* = object
+    description*: string
+    contentType*: string
+    example*: JsonNode
+    examples*: seq[(string, ApiExample)]
+
+  ApiRequestDoc* = object
+    contentType*: string
+    example*: JsonNode
+    examples*: seq[(string, ApiExample)]
+
+  EndpointMeta* = object
+    summary*: string
+    description*: string
+    operationId*: string
+    tags*: seq[string]
+    responseStatus*: int
+    request*: ApiRequestDoc
+    responses*: seq[(int, ApiResponseDoc)]
+    security*: ApiSecurity
+
+proc apiExample*(
+    summary = "", description = "", value: JsonNode = nil, externalValue = ""
+): ApiExample =
+  ApiExample(
+    summary: summary,
+    description: description,
+    value: value,
+    externalValue: externalValue,
+  )
+
+proc apiExample*[T](
+    summary = "", description = "", value: T, externalValue = ""
+): ApiExample =
+  apiExample(summary, description, parseJson(encodeJsonApi(value)), externalValue)
+
+proc apiResponseDoc*(
+    description = "",
+    contentType = "application/json",
+    example: JsonNode = nil,
+    examples: openArray[(string, ApiExample)] = [],
+): ApiResponseDoc =
+  ApiResponseDoc(
+    description: description,
+    contentType: contentType,
+    example: example,
+    examples: @examples,
+  )
+
+proc nodeName*(node: NimNode): string =
+  case node.kind
+  of nnkIdent, nnkSym:
+    $node
+  of nnkOpenSymChoice, nnkClosedSymChoice:
+    if node.len > 0:
+      nodeName(node[0])
+    else:
+      ""
+  else:
+    ""
+
+proc fieldValue*(node: NimNode): tuple[name: string, value: NimNode] =
+  if node.kind != nnkAsgn or node.len != 2:
+    error("expected name = value", node)
+  (node[0].nodeName(), node[1].copyNimTree())
+
+proc parseApiExampleBlock*(node: NimNode): NimNode =
+  if node.kind != nnkCall or node.len != 2 or
+      node[0].kind notin {nnkStrLit .. nnkTripleStrLit}:
+    error("expected \"name\": block", node)
+
+  let name = node[0].copyNimTree()
+  var summary: NimNode
+  var description: NimNode
+  var value: NimNode
+  var externalValue: NimNode
+
+  let body = node[^1]
+  for child in body:
+    let field = child.fieldValue()
+    case field.name
+    of "summary":
+      summary = field.value
+    of "description":
+      description = field.value
+    of "value":
+      value = field.value
+    of "externalValue":
+      externalValue = field.value
+    else:
+      error("unknown example field: " & field.name, child)
+
+  let call = newCall(bindSym"apiExample")
+  if not summary.isNil:
+    call.add newTree(nnkExprEqExpr, ident"summary", summary)
+  if not description.isNil:
+    call.add newTree(nnkExprEqExpr, ident"description", description)
+  if not value.isNil:
+    call.add newTree(nnkExprEqExpr, ident"value", value)
+  if not externalValue.isNil:
+    call.add newTree(nnkExprEqExpr, ident"externalValue", externalValue)
+
+  newTree(nnkExprColonExpr, name, call)
+
+proc parseApiExamplesBlock*(node: NimNode): NimNode =
+  if node.kind != nnkCall or node.len != 2 or node[0].nodeName() != "examples":
+    error("expected examples: block", node)
+
+  result = newTree(nnkTableConstr)
+  for child in node[1]:
+    result.add parseApiExampleBlock(child)
+
+proc parseApiRequestDocBlock*(body: NimNode): NimNode =
+  result = newCall(ident"apiRequestDoc")
+  for child in body:
+    if child.kind == nnkAsgn:
+      let field = child.fieldValue()
+      case field.name
+      of "contentType":
+        result.add newTree(nnkExprEqExpr, ident"contentType", field.value)
+      of "example":
+        result.add newTree(nnkExprEqExpr, ident"example", field.value)
+      else:
+        error("unknown apiRequestDoc field: " & field.name, child)
+    elif child.kind == nnkCall and child[0].nodeName() == "examples":
+      result.add newTree(nnkExprEqExpr, ident"examples", parseApiExamplesBlock(child))
+    else:
+      error("expected request field or examples block", child)
+
+proc parseApiResponseDocsBlock*(body: NimNode): NimNode =
+  result = newTree(nnkTableConstr)
+  for response in body:
+    if response.kind != nnkCall or response.len != 3 or response[0].nodeName() != "http":
+      error("expected http(status): block", response)
+
+    let statusCode = response[1].copyNimTree()
+    let responseDoc = newCall(bindSym"apiResponseDoc")
+    for child in response[2]:
+      if child.kind == nnkAsgn:
+        let field = child.fieldValue()
+        case field.name
+        of "description":
+          responseDoc.add newTree(nnkExprEqExpr, ident"description", field.value)
+        of "contentType":
+          responseDoc.add newTree(nnkExprEqExpr, ident"contentType", field.value)
+        of "example":
+          responseDoc.add newTree(nnkExprEqExpr, ident"example", field.value)
+        else:
+          error("unknown apiResponseDoc field: " & field.name, child)
+      elif child.kind == nnkCall and child[0].nodeName() == "examples":
+        responseDoc.add newTree(
+          nnkExprEqExpr, ident"examples", parseApiExamplesBlock(child)
+        )
+      else:
+        error("expected response field or examples block", child)
+
+    result.add newTree(nnkExprColonExpr, statusCode, responseDoc)
+
+macro apiResponseDocs*(body: untyped): untyped =
+  ## Builds response documentation metadata for TAPIS route registration.
+  ##
+  ## Example:
+  ##   responses = block:
+  ##     apiResponseDocs:
+  ##       http(201):
+  ##         description = "Created"
+  ##         examples:
+  ##           "created":
+  ##             value = MyResponse(...)
+  result = parseApiResponseDocsBlock(body)
+
+macro apiRequestDocs*(body: untyped): untyped =
+  ## Builds request body documentation metadata for TAPIS route registration.
+  ##
+  ## Example:
+  ##   request = block:
+  ##     apiRequestDocs:
+  ##       examples:
+  ##         "create":
+  ##           value = MyRequest(...)
+  result = parseApiRequestDocBlock(body)
+
+proc apiRequestDoc*(
+    contentType = "application/json",
+    example: JsonNode = nil,
+    examples: openArray[(string, ApiExample)] = [],
+): ApiRequestDoc =
+  ApiRequestDoc(contentType: contentType, example: example, examples: @examples)
 
 proc endpointMeta*(
     summary = "",
@@ -17,6 +205,8 @@ proc endpointMeta*(
     operationId = "",
     tags: openArray[string] = [],
     responseStatus = 200,
+    request = apiRequestDoc(),
+    responses: openArray[(int, ApiResponseDoc)] = [],
     security = noSecurity(),
 ): EndpointMeta =
   EndpointMeta(
@@ -25,6 +215,8 @@ proc endpointMeta*(
     operationId: operationId,
     tags: @tags,
     responseStatus: responseStatus,
+    request: request,
+    responses: @responses,
     security: security,
   )
 
@@ -222,6 +414,63 @@ proc responseContentSchema*[contentType: static string](
   result = newJObject()
   result[contentType] = %*{"schema": responseOpenApiSchema(RawResponse[contentType])}
 
+proc apiExampleJson(example: ApiExample): JsonNode =
+  result = newJObject()
+  if example.summary.len > 0:
+    result["summary"] = %example.summary
+  if example.description.len > 0:
+    result["description"] = %example.description
+  if example.value != nil:
+    result["value"] = example.value
+  if example.externalValue.len > 0:
+    result["externalValue"] = %example.externalValue
+
+proc applyExamples(
+    mediaType: JsonNode, example: JsonNode, examples: seq[(string, ApiExample)]
+) =
+  if example != nil:
+    mediaType["example"] = example
+  if examples.len > 0:
+    var examplesJson = newJObject()
+    for (name, example) in examples:
+      examplesJson[name] = apiExampleJson(example)
+    mediaType["examples"] = examplesJson
+
+proc applyRequestDoc(requestBody: JsonNode, doc: ApiRequestDoc) =
+  if doc.example == nil and doc.examples.len == 0:
+    return
+
+  if "content" notin requestBody:
+    requestBody["content"] = newJObject()
+  if doc.contentType notin requestBody["content"]:
+    requestBody["content"][doc.contentType] = newJObject()
+
+  requestBody["content"][doc.contentType].applyExamples(doc.example, doc.examples)
+
+proc applyResponseDoc(response: JsonNode, doc: ApiResponseDoc) =
+  if doc.description.len > 0:
+    response["description"] = %doc.description
+
+  if doc.example == nil and doc.examples.len == 0:
+    return
+
+  if "content" notin response:
+    response["content"] = newJObject()
+  if doc.contentType notin response["content"]:
+    response["content"][doc.contentType] = newJObject()
+
+  let mediaType = response["content"][doc.contentType]
+  mediaType.applyExamples(doc.example, doc.examples)
+
+proc applyResponseDocs(responses: JsonNode, docs: openArray[(int, ApiResponseDoc)]) =
+  for (statusCode, doc) in docs:
+    let key = $statusCode
+    if key notin responses:
+      responses[key] = newJObject()
+      responses[key]["description"] =
+        %(if doc.description.len > 0: doc.description else: "Additional response")
+    applyResponseDoc(responses[key], doc)
+
 proc endpointOperation*[In, Out](
     httpMethod, path: string,
     source: ApiDecodeSource,
@@ -252,6 +501,7 @@ proc endpointOperation*[In, Out](
   if hasRequestBody(source, In):
     result["requestBody"] =
       %*{"required": true, "content": contentSchema(requestBodySchema(In))}
+    result["requestBody"].applyRequestDoc(meta.request)
 
   result["responses"] =
     %*{
@@ -260,6 +510,7 @@ proc endpointOperation*[In, Out](
       "400": {"description": "Invalid request"},
       "500": {"description": "Internal server error"},
     }
+  result["responses"].applyResponseDocs(meta.responses)
 
 proc endpointOperationWithParams*[Out](
     httpMethod, path: string,
@@ -291,6 +542,7 @@ proc endpointOperationWithParams*[Out](
       "400": {"description": "Invalid request"},
       "500": {"description": "Internal server error"},
     }
+  result["responses"].applyResponseDocs(meta.responses)
 
 proc endpointOperationWithParamsAndBody*[Body, Out](
     httpMethod, path: string,
@@ -302,6 +554,7 @@ proc endpointOperationWithParamsAndBody*[Body, Out](
   result = endpointOperationWithParams(httpMethod, path, meta, parameters, Out)
   result["requestBody"] =
     %*{"required": true, "content": contentSchema(requestBodySchema(Body))}
+  result["requestBody"].applyRequestDoc(meta.request)
 
 proc addEndpoint*[In, Out](
     paths: JsonNode,

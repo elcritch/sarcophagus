@@ -33,6 +33,8 @@ template tapi*(
   operationId: static string = "",
   tags: static openArray[string] = [],
   responseStatus: static int = 200,
+  request: untyped = apiRequestDoc(),
+  responses: untyped = [],
 ) {.pragma.}
   ## Pragma for annotating procs that can be registered with `api.add`.
   ##
@@ -828,6 +830,8 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       operationId: string = "",
       tags: openArray[string] = [],
       responseStatus: int = 200,
+      request: ApiRequestDoc = apiRequestDoc(),
+      responses: openArray[(int, ApiResponseDoc)] = [],
       security: ApiSecurity = noSecurity(),
   ): untyped =
     ## Registers a typed TAPIS route for this HTTP method.
@@ -837,7 +841,10 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       path,
       handler,
       source,
-      endpointMeta(summary, description, operationId, tags, responseStatus, security),
+      endpointMeta(
+        summary, description, operationId, tags, responseStatus, request, responses,
+        security,
+      ),
     )
 
 defineApiMethod(get, "GET", adsParams)
@@ -906,7 +913,30 @@ proc staticTagsArg(node: NimNode): NimNode =
   else:
     result = node.copyNimTree()
 
-macro add*(api: typed, handler: typed, security: typed = noSecurity()): untyped =
+proc isDefaultRequestArg(node: NimNode): bool =
+  if node.kind != nnkCall or node.len == 0 or node[0].kind notin {nnkIdent, nnkSym} or
+      $node[0] != "apiRequestDoc":
+    return false
+  if node.len == 1:
+    return true
+  if node.len >= 4 and node[2].kind == nnkNilLit:
+    let examples = node[3]
+    if examples.kind == nnkBracket and examples.len == 0:
+      return true
+    if examples.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and examples.len > 0 and
+        examples[^1].kind == nnkBracket and examples[^1].len == 0:
+      return true
+
+proc isDefaultResponsesArg(node: NimNode): bool =
+  node.kind == nnkBracket and node.len == 0
+
+macro add*(
+    api: typed,
+    handler: typed,
+    security: typed = noSecurity(),
+    request: typed = apiRequestDoc(),
+    responses: typed = [],
+): untyped =
   ## Registers a proc annotated with the `tapi` pragma.
   ##
   ## Route metadata is read from the pragma, while `security` may be supplied at
@@ -931,6 +961,18 @@ macro add*(api: typed, handler: typed, security: typed = noSecurity()): untyped 
   let operationId = staticStringArg(tapiArg(pragma, 5, newLit("")))
   let tags = staticTagsArg(tapiArg(pragma, 6, newTree(nnkBracket)))
   let responseStatus = staticIntArg(tapiArg(pragma, 7, newLit(200)))
+  let pragmaRequest = tapiArg(pragma, 8, newCall(bindSym"apiRequestDoc"))
+  let pragmaResponses = tapiArg(pragma, 9, newTree(nnkBracket))
+  let requestArg =
+    if request.isDefaultRequestArg():
+      pragmaRequest
+    else:
+      request.copyNimTree()
+  let responsesArg =
+    if responses.isDefaultResponsesArg():
+      pragmaResponses
+    else:
+      responses.copyNimTree()
   let handlerTarget =
     case handler.kind
     of nnkIdent, nnkSym:
@@ -947,7 +989,9 @@ macro add*(api: typed, handler: typed, security: typed = noSecurity()): untyped 
     operationId,
     tags,
     responseStatus,
-    security,
+    newTree(nnkExprEqExpr, ident"request", requestArg),
+    newTree(nnkExprEqExpr, ident"responses", responsesArg),
+    newTree(nnkExprEqExpr, ident"security", security),
   )
 
 template options*(
@@ -959,6 +1003,8 @@ template options*(
     operationId = "",
     tags: openArray[string] = [],
     responseStatus = 200,
+    request: ApiRequestDoc = apiRequestDoc(),
+    responses: openArray[(int, ApiResponseDoc)] = [],
     security: ApiSecurity = noSecurity(),
 ): untyped =
   ## Registers an `OPTIONS` TAPIS route.
@@ -968,7 +1014,10 @@ template options*(
     path,
     handler,
     adsNone,
-    endpointMeta(summary, description, operationId, tags, responseStatus, security),
+    endpointMeta(
+      summary, description, operationId, tags, responseStatus, request, responses,
+      security,
+    ),
   )
 
 proc openApiJson*(api: ApiRouter): JsonNode =

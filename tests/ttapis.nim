@@ -86,6 +86,41 @@ proc readFlatItem(
     id: id, name: "flat-read-" & $id, count: 1, verbose: verbose.get(false), mode: ""
   )
 
+proc createAddedItem(
+    body: ItemBody
+): ItemOut {.tapi(post, "/added-items", summary = "Create added item").} =
+  ItemOut(id: 77, name: body.name, count: body.count, verbose: false, mode: "")
+
+proc createPragmaDocumentedItem(
+    body: ItemBody
+): ItemOut {.
+    tapi(
+      post,
+      "/pragma-doc-items",
+      summary = "Create pragma documented item",
+      request = apiRequestDoc(
+        examples = {
+          "pragma-request": apiExample(
+            summary = "Pragma request", value = ItemBody(name: "pragma", count: 9)
+          )
+        }
+      ),
+      responses = {
+        200: apiResponseDoc(
+          description = "Pragma response",
+          examples = {
+            "pragma-response": apiExample(
+              summary = "Pragma response",
+              value =
+                ItemOut(id: 88, name: "pragma", count: 9, verbose: false, mode: ""),
+            )
+          },
+        )
+      },
+    )
+.} =
+  ItemOut(id: 88, name: body.name, count: body.count, verbose: false, mode: "")
+
 proc getNamedTupleItem(
     params: Params[tuple[id: int, verbose: Option[bool]]]
 ): ItemOut {.gcsafe.} =
@@ -160,10 +195,61 @@ proc buildApi(includeStackTraces = false): ApiRouter =
   let api = initApiRouter("Typed Test API", "1.2.3", config)
   api.router.get("/raw-status", rawMummyStatus)
   api.get("/items/@id", getItem, summary = "Get item", tags = ["items"])
-  api.add(readItem)
+  api.add(
+    readItem,
+    responses = {
+      200: apiResponseDoc(
+        description = "Read item response",
+        examples = {
+          "read": apiExample(
+            summary = "Read item",
+            value =
+              ItemOut(id: 8, name: "read-8", count: 1, verbose: true, mode: "modeSlow"),
+          )
+        },
+      )
+    },
+  )
   api.get("/flat-items/@id", getFlatItem, summary = "Get flat item")
   api.add(readFlatItem)
-  api.post("/items", createItem, summary = "Create item", responseStatus = 201)
+  api.add(
+    createAddedItem,
+    request = apiRequestDoc(
+      examples = {
+        "added": apiExample(
+          summary = "Added item request", value = ItemBody(name: "added", count: 7)
+        )
+      }
+    ),
+  )
+  api.add(createPragmaDocumentedItem)
+  api.post(
+    "/items",
+    createItem,
+    summary = "Create item",
+    responseStatus = 201,
+    request = block:
+      apiRequestDocs:
+        examples:
+          "create":
+            summary = "Create item request"
+            value = ItemBody(name: "probe", count: 3)
+          "raw":
+            summary = "Raw JSON request"
+            value = %*{"name": "raw", "count": 5},
+    responses = block:
+      apiResponseDocs:
+        http(201):
+          description = "Created item response"
+          examples:
+            "created":
+              summary = "Created item"
+              value = ItemOut(id: 42, name: "probe", count: 3, verbose: false, mode: "")
+            "raw":
+              summary = "Raw JSON response"
+              value =
+                %*{"id": 43, "name": "raw", "count": 5, "verbose": false, "mode": ""},
+  )
   api.post("/bulk-items/@id", createBulkItem, summary = "Create bulk item")
   api.post("/queried-items", createQueriedItem, summary = "Create queried item")
   api.put("/items/@id", upsertItem, summary = "Upsert item")
@@ -475,7 +561,45 @@ suite "typed mummy tapis":
 
       let postOperation = spec["paths"]["/items"]["post"]
       check postOperation["requestBody"]["required"].getBool() == true
+      check postOperation["requestBody"]["content"]["application/json"].hasKey("schema")
+      check postOperation["requestBody"]["content"]["application/json"]["examples"][
+        "create"
+      ]["summary"].getStr() == "Create item request"
+      check postOperation["requestBody"]["content"]["application/json"]["examples"][
+        "raw"
+      ]["value"]["name"].getStr() == "raw"
       check postOperation["responses"].hasKey("201")
+      let createdResponse = postOperation["responses"]["201"]
+      check createdResponse["description"].getStr() == "Created item response"
+      check createdResponse["content"]["application/json"].hasKey("schema")
+      check createdResponse["content"]["application/json"]["examples"]["created"][
+        "summary"
+      ].getStr() == "Created item"
+      check createdResponse["content"]["application/json"]["examples"]["raw"]["value"][
+        "id"
+      ].getInt() == 43
+
+      let readOperation = spec["paths"]["/read-items/{id}"]["get"]
+      let readResponse = readOperation["responses"]["200"]
+      check readResponse["description"].getStr() == "Read item response"
+      check readResponse["content"]["application/json"]["examples"]["read"]["value"][
+        "name"
+      ].getStr() == "read-8"
+
+      let addedOperation = spec["paths"]["/added-items"]["post"]
+      check addedOperation["requestBody"]["content"]["application/json"]["examples"][
+        "added"
+      ]["value"]["count"].getInt() == 7
+
+      let pragmaOperation = spec["paths"]["/pragma-doc-items"]["post"]
+      check pragmaOperation["requestBody"]["content"]["application/json"]["examples"][
+        "pragma-request"
+      ]["value"]["name"].getStr() == "pragma"
+      check pragmaOperation["responses"]["200"]["description"].getStr() ==
+        "Pragma response"
+      check pragmaOperation["responses"]["200"]["content"]["application/json"][
+        "examples"
+      ]["pragma-response"]["value"]["id"].getInt() == 88
 
       let bulkOperation = spec["paths"]["/bulk-items/{id}"]["post"]
       check bulkOperation["parameters"][0]["name"].getStr() == "id"

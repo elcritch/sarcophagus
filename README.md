@@ -142,6 +142,32 @@ proc updateItem(
   ItemOut(id: input.params.id, name: input.body.name, count: input.body.count)
 ```
 
+Request and response examples can be added to the OpenAPI document with the
+block-style docs helpers:
+
+```nim
+api.post(
+  "/items",
+  createItem,
+  summary = "Create item",
+  responseStatus = 201,
+  request = block:
+    apiRequestDocs:
+      examples:
+        "create":
+          summary = "Create item request"
+          value = CreateItemBody(name: "probe", count: 3),
+  responses = block:
+    apiResponseDocs:
+      http(201):
+        description = "Created item response"
+        examples:
+          "created":
+            summary = "Created item"
+            value = ItemOut(id: 42, name: "probe", count: 3),
+)
+```
+
 TAPIS routes and regular Mummy handlers can use the same router. Register raw
 Mummy handlers on `api.router` when you need lower-level control or an endpoint
 that should not participate in TAPIS encoding and OpenAPI metadata:

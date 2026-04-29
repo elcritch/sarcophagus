@@ -79,7 +79,45 @@ proc getPetFlat(id: int, includeSold: Option[bool]): Pet {.gcsafe.} =
 
   raiseApiError(404, "pet not found", "pet_not_found", details = %*{"id": id})
 
-proc createPet(body: CreatePetBody): ApiResponse[Pet] {.gcsafe.} =
+let createPetRequestDocs = block:
+  apiRequestDocs:
+    examples:
+      "cat":
+        summary = "Create a cat"
+        value = CreatePetBody(name: "Ada", species: "cat", age: some(4))
+      "dog":
+        summary = "Create a dog"
+        value = CreatePetBody(name: "Grace", species: "dog", age: none(int))
+
+let createPetResponseDocs = block:
+  apiResponseDocs:
+    http(201):
+      description = "Pet created"
+      examples:
+        "cat":
+          summary = "Create a cat"
+          value = Pet(
+            id: 100, name: "Ada", species: "cat", status: petAvailable, age: some(4)
+          )
+        "dog":
+          summary = "Create a dog"
+          value = Pet(
+            id: 100, name: "Grace", species: "dog", status: petAvailable, age: none(int)
+          )
+
+proc createPet(
+    body: CreatePetBody
+): ApiResponse[Pet] {.
+    tapi(
+      post,
+      "/pets",
+      summary = "Create a pet",
+      tags = ["pets"],
+      responseStatus = 201,
+      request = createPetRequestDocs,
+      responses = createPetResponseDocs,
+    )
+.} =
   var headers: HttpHeaders
   headers["Location"] = "/pets/100"
   apiResponse(
@@ -101,6 +139,18 @@ proc updatePet(input: ApiRequest[PetPath, CreatePetBody]): Pet {.gcsafe.} =
     species: input.body.species,
     status: petPending,
     age: input.body.age,
+  )
+
+proc createPetDirect(body: CreatePetBody): ApiResponse[Pet] {.gcsafe.} =
+  apiResponse(
+    Pet(
+      id: 101,
+      name: body.name,
+      species: body.species,
+      status: petAvailable,
+      age: body.age,
+    ),
+    statusCode = 201,
   )
 
 proc deletePet(params: Params[PetPath]): MessageResponse {.gcsafe.} =
@@ -194,8 +244,29 @@ when isMainModule:
     summary = "Get a pet with flat params",
     tags = ["pets"],
   )
+  apiRouter.add(createPet)
   apiRouter.post(
-    "/pets", createPet, summary = "Create a pet", tags = ["pets"], responseStatus = 201
+    "/direct-pets",
+    createPetDirect,
+    summary = "Create a pet with direct docs",
+    tags = ["pets"],
+    responseStatus = 201,
+    request = block:
+      apiRequestDocs:
+        examples:
+          "cat":
+            summary = "Create a cat"
+            value = CreatePetBody(name: "Ada", species: "cat", age: some(4)),
+    responses = block:
+      apiResponseDocs:
+        http(201):
+          description = "Pet created"
+          examples:
+            "cat":
+              summary = "Created cat"
+              value = Pet(
+                id: 101, name: "Ada", species: "cat", status: petAvailable, age: some(4)
+              ),
   )
   apiRouter.put("/pets/@id", updatePet, summary = "Update a pet", tags = ["pets"])
   apiRouter.delete("/pets/@id", deletePet, summary = "Delete a pet", tags = ["pets"])
