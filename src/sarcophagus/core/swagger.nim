@@ -182,12 +182,13 @@ macro apiResponseDocs*(body: untyped): untyped =
   ## Builds response documentation metadata for TAPIS route registration.
   ##
   ## Example:
-  ##   responses = apiResponseDocs:
-  ##     http(201):
-  ##       description = "Created"
-  ##       examples:
-  ##         apiExample("created"):
-  ##           value = MyResponse(...)
+  ##   responses = block:
+  ##     apiResponseDocs:
+  ##       http(201):
+  ##         description = "Created"
+  ##         examples:
+  ##           apiExample("created"):
+  ##             value = MyResponse(...)
   result = parseApiResponseDocsBlock(body)
 
 macro apiRequestDocs*(body: untyped): untyped =

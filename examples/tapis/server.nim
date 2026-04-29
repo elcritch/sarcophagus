@@ -88,41 +88,38 @@ proc createPet(
       summary = "Create a pet",
       tags = ["pets"],
       responseStatus = 201,
-      request = apiRequestDoc(
-        examples = {
-          "cat": apiExample(
-            summary = "Create a cat",
-            value = CreatePetBody(name: "Ada", species: "cat", age: some(4)),
-          ),
-          "dog": apiExample(
-            summary = "Create a dog",
-            value = CreatePetBody(name: "Grace", species: "dog", age: none(int)),
-          ),
-        }
-      ),
-      responses = {
-        201: apiResponseDoc(
-          description = "Pet created",
-          examples = {
-            "cat": apiExample(
-              summary = "Create a cat",
-              value = Pet(
-                id: 100, name: "Ada", species: "cat", status: petAvailable, age: some(4)
-              ),
-            ),
-            "dog": apiExample(
-              summary = "Create a dog",
-              value = Pet(
-                id: 100,
-                name: "Grace",
-                species: "dog",
-                status: petAvailable,
-                age: none(int),
-              ),
-            ),
-          },
-        )
-      },
+      request = block:
+        apiRequestDocs:
+          examples:
+            apiExample("cat"):
+              summary = "Create a cat"
+              value = CreatePetBody(name: "Ada", species: "cat", age: some(4))
+            apiExample("dog"):
+              summary = "Create a dog"
+              value = CreatePetBody(name: "Grace", species: "dog", age: none(int)),
+      responses = block:
+        apiResponseDocs:
+          http(201):
+            description = "Pet created"
+            examples:
+              apiExample("cat"):
+                summary = "Create a cat"
+                value = Pet(
+                  id: 100,
+                  name: "Ada",
+                  species: "cat",
+                  status: petAvailable,
+                  age: some(4),
+                )
+              apiExample("dog"):
+                summary = "Create a dog"
+                value = Pet(
+                  id: 100,
+                  name: "Grace",
+                  species: "dog",
+                  status: petAvailable,
+                  age: none(int),
+                ),
     )
 .} =
   var headers: HttpHeaders
