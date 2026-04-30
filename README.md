@@ -493,6 +493,16 @@ router.registerHashedOAuth2(
 )
 ```
 
+Typed API routers support the same endpoint registration:
+
+```nim
+api.registerHashedOAuth2(
+  oauthConfig,
+  proc(clientId: string): Option[HashedOAuth2Client] {.gcsafe.} =
+    loadClientFromDb(clientId),
+)
+```
+
 The token endpoint verifies `client_secret` with `verifySecret`, rejects disabled
 clients, mints the same Sarcophagus bearer tokens as `sarcophagus/oauth2`, and
 can emit best-effort audit events through `onAudit`.

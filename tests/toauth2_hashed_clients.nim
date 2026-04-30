@@ -3,7 +3,7 @@ import std/[httpclient, json, options, random, strutils, tables, unittest]
 import mummy
 import mummy/routers
 
-import sarcophagus/[core/jwt_bearer_tokens, oauth2/core, oauth2/hashed_clients]
+import sarcophagus/[core/jwt_bearer_tokens, oauth2/core, oauth2/hashed_clients, tapis]
 
 type ServerThreadArgs = object
   server: Server
@@ -215,6 +215,55 @@ suite "hashed oauth2 clients":
       httpMethod = HttpPost,
       headers = newHttpHeaders({"Content-Type": "application/json"}),
       body = """{"client_id":"reader-app","client_secret":"secret-reader"}""",
+    )
+
+    check response.code.int == 200
+    check response.headers["Cache-Control"] == "no-store"
+    check response.headers["Pragma"] == "no-cache"
+    check parseJson(response.body)["token_type"].getStr() == "Bearer"
+    check store.auditEvents.len == 1
+
+  test "typed api router token handler issues tokens from hashed client store":
+    randomize()
+    let config = testConfig()
+    let store = newInMemoryHashedOAuth2ClientStore()
+    discard seedHashedOAuth2Client(
+      store.upsertCallback(),
+      clientId = "typed-reader-app",
+      clientSecret = "secret-reader",
+      scopes = ["sync:read"],
+    )
+
+    let api = initApiRouter("Hashed OAuth2 Typed Test API", "1.0.0")
+    api.registerHashedOAuth2(
+      config,
+      store.loadCallback(),
+      tokenPath = "/typed/oauth/token",
+      onAudit = store.auditCallback(),
+    )
+
+    let server = newServer(api.router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let response = client.request(
+      "http://127.0.0.1:" & $portNumber & "/typed/oauth/token",
+      httpMethod = HttpPost,
+      headers = newHttpHeaders({"Content-Type": "application/json"}),
+      body = """{"client_id":"typed-reader-app","client_secret":"secret-reader"}""",
     )
 
     check response.code.int == 200

@@ -7,6 +7,9 @@ import ./core/[swagger, typed_api]
 from ./oauth2/core import
   OAuth2AuthorizationCodeConsumer, OAuth2AuthorizationCodeSaver, OAuth2Config
 from ./oauth2/common import OAuth2CurrentUserLoader
+from ./oauth2/hashed_clients import
+  HashedOAuth2AuditProc, HashedOAuth2ClientLoader, defaultSecretHashPolicy,
+  hashedOAuth2TokenHandler, noopHashedOAuth2Audit
 from ./oauth2/mummy_support import oauth2AuthorizeHandler, oauth2TokenHandler
 import ./tapis_utils
 import ./tapis_security
@@ -309,6 +312,21 @@ proc addRequestHandler*(
 proc registerOAuth2*(api: ApiRouter, config: OAuth2Config, tokenPath = "/oauth/token") =
   ## Mounts the OAuth2 token endpoint on this typed API router.
   api.addRequestHandler("POST", tokenPath, oauth2TokenHandler(config))
+
+proc registerHashedOAuth2*(
+    api: ApiRouter,
+    config: OAuth2Config,
+    loadClient: HashedOAuth2ClientLoader,
+    tokenPath = "/oauth/token",
+    onAudit: HashedOAuth2AuditProc = noopHashedOAuth2Audit,
+    policy = defaultSecretHashPolicy(),
+) =
+  ## Mounts a hashed-client OAuth2 token endpoint on this typed API router.
+  api.addRequestHandler(
+    "POST",
+    tokenPath,
+    hashedOAuth2TokenHandler(config, loadClient, onAudit = onAudit, policy = policy),
+  )
 
 proc registerOAuth2AuthorizationCode*(
     api: ApiRouter,
