@@ -30,7 +30,7 @@ nim c -d:chroniclersLogBackend=none app.nim
 ```
 
 Use `-d:chroniclersLogBackend=std` for Nim's `std/logging`, or install 
-Sarcophagus with the `chronicles` feature to use Chronicles (recommended) using `requires "sarcophagus[chronciles]"` in your Nimble file.
+Sarcophagus with the `chronicles` feature to use Chronicles (recommended) using `requires "sarcophagus[chroncicles]"` in your Nimble file.
 
 ## Basic Example
 
