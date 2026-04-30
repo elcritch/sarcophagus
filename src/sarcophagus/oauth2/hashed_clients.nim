@@ -2,6 +2,7 @@ import std/json
 
 import mummy
 import mummy/routers
+import chroniclers
 
 import ../security/secret_hashing
 import ../tapis_utils
@@ -38,7 +39,14 @@ proc hashedOAuth2TokenHandler*(
   ## `oauth2TokenHandler`: HTTP Basic auth, request-body form auth, and JSON
   ## request-body auth.
   return proc(request: Request) {.gcsafe.} =
+    trace "hashed oauth2 token endpoint request",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      contentType = request.headers["Content-Type"],
+      authorizationHeaderPresent = request.headers["Authorization"].strip().len > 0
     if request.httpMethod != "POST":
+      warn "hashed oauth2 token endpoint method rejected",
+        httpMethod = request.httpMethod, path = request.path, allow = "POST"
       var headers: HttpHeaders
       headers["Allow"] = "POST"
       request.respondJson(
@@ -57,12 +65,22 @@ proc hashedOAuth2TokenHandler*(
     )
 
     if not tokenResult.ok:
+      notice "hashed oauth2 token endpoint denied",
+        path = request.path,
+        statusCode = tokenResult.failure.statusCode,
+        error = tokenResult.failure.error,
+        errorDescription = tokenResult.failure.errorDescription
       request.respondTypedApiValue(onError(tokenResult.failure))
       return
 
     var headers: HttpHeaders
     headers["Cache-Control"] = "no-store"
     headers["Pragma"] = "no-cache"
+    info "hashed oauth2 token endpoint issued token",
+      path = request.path,
+      tokenType = tokenResult.response.tokenType,
+      expiresIn = tokenResult.response.expiresIn,
+      scope = tokenResult.response.scope
     request.respondJson(200, $tokenResult.response.toJson(), headers)
 
 proc registerHashedOAuth2*(

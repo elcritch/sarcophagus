@@ -1,6 +1,7 @@
 import std/macros
 
 import mummy
+import chroniclers
 
 import ./core/jwt_bearer_tokens
 import ./tapis_utils
@@ -56,8 +57,27 @@ proc validateBearerRequest*(
   ## Validates the request's `Authorization: Bearer ...` token.
   ##
   ## `requiredScopes` must all be present in the token for validation to pass.
+  trace "validating bearer request",
+    httpMethod = request.httpMethod,
+    path = request.path,
+    authorizationHeaderPresent = request.headers["Authorization"].strip().len > 0,
+    requiredScopeCount = requiredScopes.len
   let token = bearerTokenFromAuthorizationHeader(request.headers["Authorization"])
-  validateBearerToken(config, token, requiredScopes)
+  result = validateBearerToken(config, token, requiredScopes)
+  if result.ok:
+    debug "bearer request authorized",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      subject = result.claims.subject,
+      scopeCount = result.claims.scopes.len
+  else:
+    notice "bearer request denied",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      statusCode = result.failure.statusCode,
+      code = result.failure.code,
+      message = result.failure.message,
+      requiredScopeCount = requiredScopes.len
 
 proc requireBearerAuth*(
     request: Request,

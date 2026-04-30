@@ -1,6 +1,7 @@
 import std/[base64, json, options, strutils, tables]
 
 import bearssl/hash
+import chroniclers
 
 import ../core/jwt_bearer_tokens
 import ./utils
@@ -147,6 +148,11 @@ proc tokenFailure(
     wwwAuthenticate = "",
     errorUri = "",
 ): OAuth2TokenResult =
+  notice "oauth2 token request denied",
+    statusCode = statusCode,
+    error = error,
+    errorDescription = errorDescription,
+    hasChallenge = wwwAuthenticate.len > 0
   OAuth2TokenResult(
     ok: false,
     failure: OAuth2Failure(
@@ -159,6 +165,8 @@ proc tokenFailure(
   )
 
 proc tokenSuccess(response: OAuth2TokenResponse): OAuth2TokenResult =
+  debug "oauth2 token request succeeded",
+    expiresIn = response.expiresIn, scope = response.scope
   OAuth2TokenResult(ok: true, response: response)
 
 proc resourceFailure(
@@ -168,6 +176,11 @@ proc resourceFailure(
     wwwAuthenticate: string,
     errorUri = "",
 ): OAuth2ResourceResult =
+  debug "oauth2 resource request denied",
+    statusCode = statusCode,
+    error = error,
+    errorDescription = errorDescription,
+    hasChallenge = wwwAuthenticate.len > 0
   OAuth2ResourceResult(
     ok: false,
     failure: OAuth2Failure(
@@ -180,6 +193,10 @@ proc resourceFailure(
   )
 
 proc resourceSuccess(claims: BearerTokenClaims): OAuth2ResourceResult =
+  debug "oauth2 resource token accepted",
+    subject = claims.subject,
+    scopeCount = claims.scopes.len,
+    expiresAt = claims.expiresAt
   OAuth2ResourceResult(ok: true, claims: claims)
 
 proc parseRequestParams(body: string): Table[string, string] =
@@ -275,6 +292,11 @@ proc save*(
     authorizationCode: OAuth2AuthorizationCode,
 ) {.gcsafe.} =
   ## Saves an authorization code in the in-memory test store.
+  trace "oauth2 authorization code saved",
+    clientId = authorizationCode.clientId,
+    subject = authorizationCode.subject,
+    scopeCount = authorizationCode.scopes.len,
+    expiresAt = authorizationCode.expiresAt
   {.cast(gcsafe).}:
     store.codes[authorizationCode.code] = authorizationCode
 
@@ -284,12 +306,19 @@ proc consume*(
   ## Fetches and marks an authorization code as consumed in the in-memory store.
   {.cast(gcsafe).}:
     if code notin store.codes:
+      debug "oauth2 authorization code consume failed", reason = "not_found"
       return none(OAuth2AuthorizationCode)
     var authorizationCode = store.codes[code]
     if authorizationCode.consumed:
+      notice "oauth2 authorization code replay rejected",
+        clientId = authorizationCode.clientId, subject = authorizationCode.subject
       return none(OAuth2AuthorizationCode)
     authorizationCode.consumed = true
     store.codes[code] = authorizationCode
+    debug "oauth2 authorization code consumed",
+      clientId = authorizationCode.clientId,
+      subject = authorizationCode.subject,
+      scopeCount = authorizationCode.scopes.len
     some(authorizationCode)
 
 proc randomOAuth2AuthorizationCode*(): string =
@@ -443,6 +472,8 @@ proc toJson*(failure: OAuth2Failure): JsonNode =
 proc authorizationCodeFailure(
     statusCode: int, error: string, errorDescription: string, errorUri = ""
 ): OAuth2AuthorizationCodeResult =
+  notice "oauth2 authorization request denied",
+    statusCode = statusCode, error = error, errorDescription = errorDescription
   OAuth2AuthorizationCodeResult(
     ok: false,
     failure: OAuth2Failure(
@@ -456,6 +487,12 @@ proc authorizationCodeFailure(
 proc authorizationCodeSuccess(
     authorizationCode: OAuth2AuthorizationCode
 ): OAuth2AuthorizationCodeResult =
+  info "oauth2 authorization code issued",
+    clientId = authorizationCode.clientId,
+    subject = authorizationCode.subject,
+    scopeCount = authorizationCode.scopes.len,
+    expiresAt = authorizationCode.expiresAt,
+    hasPkce = authorizationCode.codeChallenge.len > 0
   OAuth2AuthorizationCodeResult(ok: true, authorizationCode: authorizationCode)
 
 proc allowsRedirectUri(client: OAuth2Client, redirectUri: string): bool =
@@ -482,6 +519,12 @@ proc issueAuthorizationCode*(
   ## The caller owns user authentication and consent. `saveAuthorizationCode`
   ## should persist the code with an expiry and enforce single-use consumption
   ## through the matching `OAuth2AuthorizationCodeConsumer`.
+  trace "issuing oauth2 authorization code",
+    clientIdPresent = clientId.strip().len > 0,
+    redirectUriPresent = redirectUri.strip().len > 0,
+    subjectPresent = subject.strip().len > 0,
+    requestedScopePresent = requestedScopeParam.len > 0,
+    pkcePresent = codeChallenge.strip().len > 0
   let effectiveClientId = clientId.strip()
   if effectiveClientId.len == 0:
     return authorizationCodeFailure(400, "invalid_request", "client_id is required")
@@ -549,7 +592,9 @@ proc issueAuthorizationCode*(
 
   try:
     saveAuthorizationCode(authorizationCode)
-  except CatchableError:
+  except CatchableError as e:
+    error "oauth2 authorization code storage failed",
+      clientId = effectiveClientId, subject = effectiveSubject, message = e.msg
     return
       authorizationCodeFailure(500, "server_error", "Authorization code storage failed")
 
@@ -562,6 +607,10 @@ proc issueClientCredentialsToken*(
     requestBody: string,
     now = nowUnix(),
 ): OAuth2TokenResult =
+  trace "issuing oauth2 client credentials token",
+    contentType = contentType,
+    authorizationHeaderPresent = authorizationHeader.strip().len > 0,
+    requestBodyLength = requestBody.len
   if not isFormUrlEncodedContentType(contentType) and not isJsonContentType(contentType):
     return tokenFailure(
       400, "invalid_request",
@@ -643,6 +692,8 @@ proc issueClientCredentialsToken*(
       buildChallenge("Basic", config.realm),
     )
   if effectiveClientId notin config.clients:
+    notice "oauth2 client authentication failed",
+      clientId = effectiveClientId, reason = "unknown_client"
     return tokenFailure(
       401,
       "invalid_client",
@@ -652,6 +703,8 @@ proc issueClientCredentialsToken*(
 
   let client = config.clients[effectiveClientId]
   if not constantTimeEquals(client.clientSecret, clientSecret):
+    notice "oauth2 client authentication failed",
+      clientId = effectiveClientId, reason = "invalid_secret"
     return tokenFailure(
       401,
       "invalid_client",
@@ -661,6 +714,8 @@ proc issueClientCredentialsToken*(
 
   let requestedScopes = resolveRequestedScopes(client, params.getOrDefault("scope", ""))
   if not validateRequestedScopes(client, requestedScopes):
+    notice "oauth2 client credentials scope rejected",
+      clientId = effectiveClientId, requestedScope = scopeListToString(requestedScopes)
     return tokenFailure(
       400, "invalid_scope", "The requested scope is invalid for this client"
     )
@@ -681,6 +736,12 @@ proc issueClientCredentialsToken*(
   )
 
   discard authMethod
+  info "oauth2 client credentials token issued",
+    clientId = effectiveClientId,
+    subject = client.subject,
+    authMethod = $authMethod,
+    scope = scopeListToString(requestedScopes),
+    ttlSeconds = ttlSeconds
   tokenSuccess(
     OAuth2TokenResponse(
       accessToken: token,
@@ -697,6 +758,9 @@ proc exchangeAuthorizationCodeTokenFromParams(
     params: Table[string, string],
     now: int64,
 ): OAuth2TokenResult =
+  trace "exchanging oauth2 authorization code",
+    authorizationHeaderPresent = authorizationHeader.strip().len > 0,
+    parameterCount = params.len
   let parsedAuth = parseAuthorizationHeader(authorizationHeader)
   if parsedAuth.present and parsedAuth.malformed:
     return tokenFailure(
@@ -740,6 +804,8 @@ proc exchangeAuthorizationCodeTokenFromParams(
   if effectiveClientId.len == 0:
     return tokenFailure(400, "invalid_request", "client_id is required")
   if effectiveClientId notin config.clients:
+    notice "oauth2 authorization code client rejected",
+      clientId = effectiveClientId, reason = "unknown_client"
     return tokenFailure(
       401,
       "invalid_client",
@@ -757,6 +823,8 @@ proc exchangeAuthorizationCodeTokenFromParams(
         buildChallenge("Basic", config.realm),
       )
     if not constantTimeEquals(client.clientSecret, clientSecret):
+      notice "oauth2 authorization code client rejected",
+        clientId = effectiveClientId, reason = "invalid_secret"
       return tokenFailure(
         401,
         "invalid_client",
@@ -764,6 +832,7 @@ proc exchangeAuthorizationCodeTokenFromParams(
         buildChallenge("Basic", config.realm),
       )
   elif clientSecret.len > 0:
+    notice "oauth2 public client sent secret", clientId = effectiveClientId
     return tokenFailure(
       401,
       "invalid_client",
@@ -778,16 +847,24 @@ proc exchangeAuthorizationCodeTokenFromParams(
   let authorizationCode =
     try:
       consumeAuthorizationCode(codeValue)
-    except CatchableError:
+    except CatchableError as e:
+      error "oauth2 authorization code consumption failed",
+        clientId = effectiveClientId, message = e.msg
       return tokenFailure(500, "server_error", "Authorization code storage failed")
 
   if authorizationCode.isNone:
+    notice "oauth2 authorization code rejected",
+      clientId = effectiveClientId, reason = "invalid_code"
     return tokenFailure(400, "invalid_grant", "Authorization code is invalid")
 
   let code = authorizationCode.get()
   if code.expiresAt <= now:
+    notice "oauth2 authorization code rejected",
+      clientId = effectiveClientId, reason = "expired"
     return tokenFailure(400, "invalid_grant", "Authorization code expired")
   if code.clientId != client.clientId:
+    notice "oauth2 authorization code rejected",
+      clientId = effectiveClientId, reason = "client_mismatch"
     return tokenFailure(
       400, "invalid_grant", "Authorization code was issued to another client"
     )
@@ -796,11 +873,15 @@ proc exchangeAuthorizationCodeTokenFromParams(
   if redirectUri.len == 0:
     return tokenFailure(400, "invalid_request", "redirect_uri is required")
   if redirectUri != code.redirectUri:
+    notice "oauth2 authorization code rejected",
+      clientId = effectiveClientId, reason = "redirect_uri_mismatch"
     return tokenFailure(
       400, "invalid_grant", "redirect_uri does not match authorization code"
     )
 
   if not validateRequestedScopes(client, code.scopes):
+    notice "oauth2 authorization code rejected",
+      clientId = effectiveClientId, reason = "scope_no_longer_allowed"
     return tokenFailure(
       400, "invalid_grant", "Authorization code scopes are no longer allowed"
     )
@@ -812,8 +893,11 @@ proc exchangeAuthorizationCodeTokenFromParams(
     if not validatePkceVerifier(
       code.codeChallenge, code.codeChallengeMethod, codeVerifier
     ):
+      notice "oauth2 pkce verification failed", clientId = effectiveClientId
       return tokenFailure(400, "invalid_grant", "PKCE verification failed")
   elif client.requirePkce:
+    notice "oauth2 authorization code rejected",
+      clientId = effectiveClientId, reason = "missing_pkce_challenge"
     return tokenFailure(400, "invalid_grant", "PKCE challenge is required")
 
   let ttlSeconds =
@@ -831,6 +915,11 @@ proc exchangeAuthorizationCodeTokenFromParams(
     ),
   )
 
+  info "oauth2 authorization code token issued",
+    clientId = effectiveClientId,
+    subject = code.subject,
+    scope = scopeListToString(code.scopes),
+    ttlSeconds = ttlSeconds
   tokenSuccess(
     OAuth2TokenResponse(
       accessToken: token,
@@ -849,6 +938,10 @@ proc exchangeAuthorizationCodeToken*(
     now = nowUnix(),
 ): OAuth2TokenResult =
   ## Exchanges an OAuth2 authorization code for a bearer access token.
+  trace "handling oauth2 authorization code token request",
+    contentType = contentType,
+    authorizationHeaderPresent = authorizationHeader.strip().len > 0,
+    requestBodyLength = requestBody.len
   if not isFormUrlEncodedContentType(contentType) and not isJsonContentType(contentType):
     return tokenFailure(
       400, "invalid_request",
@@ -887,6 +980,10 @@ proc issueOAuth2Token*(
   ## `client_credentials` keeps the existing behavior, including the historical
   ## default when `grant_type` is omitted. `authorization_code` uses
   ## `consumeAuthorizationCode` to atomically consume a stored code.
+  trace "handling oauth2 token request",
+    contentType = contentType,
+    authorizationHeaderPresent = authorizationHeader.strip().len > 0,
+    requestBodyLength = requestBody.len
   if not isFormUrlEncodedContentType(contentType) and not isJsonContentType(contentType):
     return tokenFailure(
       400, "invalid_request",
@@ -924,6 +1021,9 @@ proc validateOAuth2BearerToken*(
     requiredScopes: openArray[string] = [],
     now = nowUnix(),
 ): OAuth2ResourceResult =
+  trace "validating oauth2 bearer token",
+    authorizationHeaderPresent = authorizationHeader.strip().len > 0,
+    requiredScopeCount = requiredScopes.len
   let parsedAuth = parseAuthorizationHeader(authorizationHeader)
   if not parsedAuth.present:
     return resourceFailure(401, "", "", buildChallenge("Bearer", config.realm))

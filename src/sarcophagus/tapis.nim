@@ -2,6 +2,7 @@ import std/[json, macros, options, strutils]
 
 import mummy
 import mummy/routers
+import chroniclers
 
 import ./core/[swagger, typed_api]
 from ./oauth2/core import
@@ -83,6 +84,13 @@ proc respondEncoded(
 ) =
   var responseHeaders = headers
   responseHeaders["Content-Type"] = formatContentType(format)
+  trace "tapis response encoded",
+    httpMethod = request.httpMethod,
+    path = request.path,
+    uri = request.uri,
+    statusCode = statusCode,
+    contentType = responseHeaders["Content-Type"],
+    bodyLength = body.len
   if request.httpMethod == "HEAD":
     responseHeaders["Content-Length"] = $body.len
     request.respond(statusCode, responseHeaders)
@@ -108,11 +116,23 @@ proc respondApi[T](request: Request, value: ApiResponse[T], config: ApiConfig) =
     value.headers.toHttpHeaders(),
   )
 
+proc traceTapisRawResponse(
+    request: Request, statusCode: int, contentType: string, bodyLength: int
+) {.gcsafe.} =
+  trace "tapis raw response",
+    httpMethod = request.httpMethod,
+    path = request.path,
+    uri = request.uri,
+    statusCode = statusCode,
+    contentType = contentType,
+    bodyLength = bodyLength
+
 proc respondRaw[contentType: static string](
     request: Request, value: RawResponse[contentType]
 ) =
   var headers = value.headers.toHttpHeaders()
   headers["Content-Type"] = contentType
+  traceTapisRawResponse(request, value.statusCode, contentType, value.body.len)
   if request.httpMethod == "HEAD":
     headers["Content-Length"] = $value.body.len
     request.respond(value.statusCode, headers)
@@ -307,7 +327,38 @@ proc addRequestHandler*(
     api: ApiRouter, httpMethod, path: string, handler: RequestHandler
 ) =
   ## Registers a raw Mummy request handler on the wrapped router.
-  api.router.addRoute(httpMethod, path, handler)
+  let tracedHandler: RequestHandler = proc(request: Request) {.gcsafe.} =
+    trace "tapis request received",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      uri = request.uri,
+      routeMethod = httpMethod,
+      routePath = path,
+      pathParamCount = request.pathParams.len,
+      queryParamCount = request.queryParams.len,
+      bodyLength = request.body.len,
+      contentType = request.headers["Content-Type"],
+      accept = request.headers["Accept"]
+    try:
+      handler(request)
+      trace "tapis request handler returned",
+        httpMethod = request.httpMethod,
+        path = request.path,
+        uri = request.uri,
+        routeMethod = httpMethod,
+        routePath = path
+    except CatchableError as e:
+      discard e
+      trace "tapis request handler raised",
+        httpMethod = request.httpMethod,
+        path = request.path,
+        uri = request.uri,
+        routeMethod = httpMethod,
+        routePath = path,
+        exception = e.name,
+        message = e.msg
+      raise
+  api.router.addRoute(httpMethod, path, tracedHandler)
 
 proc registerOAuth2*(api: ApiRouter, config: OAuth2Config, tokenPath = "/oauth/token") =
   ## Mounts the OAuth2 token endpoint on this typed API router.
@@ -352,6 +403,24 @@ proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =
   ## Converts an exception to a negotiated TAPIS error response.
   let statusCode = apiErrorStatus(e)
   let body = apiErrorBody(e, config)
+  if statusCode >= 500:
+    error "tapis request failed",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      uri = request.uri,
+      statusCode = statusCode,
+      errorCode = apiErrorCode(e),
+      exception = e.name,
+      message = e.msg
+  else:
+    warn "tapis request rejected",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      uri = request.uri,
+      statusCode = statusCode,
+      errorCode = apiErrorCode(e),
+      exception = e.name,
+      message = e.msg
   let format =
     try:
       responseFormat(request, config)
@@ -452,7 +521,7 @@ proc route*[Out](
 ) =
   ## Registers a typed route with no decoded input.
   api.addEndpoint(httpMethod, path, source, meta, EmptyInput, Out)
-  api.router.addRoute(
+  api.addRequestHandler(
     httpMethod,
     path,
     secureRequestHandler(
@@ -469,7 +538,7 @@ proc route*[Out](
 ) =
   ## Registers a request-aware typed route with no decoded input.
   api.addEndpoint(httpMethod, path, source, meta, EmptyInput, Out)
-  api.router.addRoute(
+  api.addRequestHandler(
     httpMethod,
     path,
     secureRequestHandler(
@@ -486,7 +555,7 @@ proc route*[In, Out](
 ) =
   ## Registers a typed route with decoded parameters or body input.
   api.addEndpoint(httpMethod, path, source, meta, In, Out)
-  api.router.addRoute(
+  api.addRequestHandler(
     httpMethod,
     path,
     secureRequestHandler(
@@ -503,7 +572,7 @@ proc route*[In, Out](
 ) =
   ## Registers a request-aware typed route with decoded input.
   api.addEndpoint(httpMethod, path, source, meta, In, Out)
-  api.router.addRoute(
+  api.addRequestHandler(
     httpMethod,
     path,
     secureRequestHandler(
@@ -1048,6 +1117,13 @@ proc openApiHandler*(api: ApiRouter): RequestHandler =
     var headers: HttpHeaders
     headers["Content-Type"] = jsonContentType
     let body = $api.openApiJson()
+    trace "tapis openapi response",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      uri = request.uri,
+      statusCode = 200,
+      contentType = headers["Content-Type"],
+      bodyLength = body.len
     if request.httpMethod == "HEAD":
       headers["Content-Length"] = $body.len
       request.respond(200, headers)
@@ -1056,7 +1132,7 @@ proc openApiHandler*(api: ApiRouter): RequestHandler =
 
 proc mountOpenApi*(api: ApiRouter, path = "/swagger.json") =
   ## Mounts the OpenAPI JSON handler at `path`.
-  api.router.get(path, api.openApiHandler())
+  api.addRequestHandler("GET", path, api.openApiHandler())
 
 proc toHandler*(api: ApiRouter): RequestHandler =
   ## Converts the wrapped Mummy router to a Mummy request handler.
