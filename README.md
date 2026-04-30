@@ -12,6 +12,19 @@ nimble install https://github.com/elcritch/sarcophagus
 
 Note, `jwt` can cause issues during installation. Add `requires "jwt >= 0.3"` to your nimble file if you get `jwt` issues.
 
+## Logging
+
+Sarcophagus uses [Chroniclers](https://github.com/elcritch/chroniclers) for
+logging facade support. To compile out Chroniclers log calls in an application,
+build with:
+
+```sh
+nim c -d:chroniclersLogBackend=none app.nim
+```
+
+Use `-d:chroniclersLogBackend=std` for Nim's `std/logging`, or enable
+Sarcophagus' `chronicles` feature to route Chroniclers through Chronicles.
+
 ## Basic Example
 
 ```nim
@@ -220,24 +233,6 @@ for other string response types.
 By default, TAPIS supports JSON. Compile with `-d:feature.sarcophagus.cbor` or
 `-d:feature.sarcophagus.msgpack` to enable CBOR or MessagePack request/response
 negotiation.
-
-## `sarcophagus/logging`
-
-`sarcophagus/logging` provides a small structured logging facade that can route
-to Chronicles, Nim's `std/logging`, or no logging at compile time.
-
-```nim
-import sarcophagus/logging
-
-info "request complete", route = "/items/42", status = 200, elapsedMs = 12.5
-warn "request slow", route = "/items/42", elapsedMs = 450
-```
-
-Select the backend with `-d:sarcophagusLogBackend=chronicles|std|none`. If it is
-not set, Sarcophagus uses Chronicles when `feature.sarcophagus.chronicles` is
-enabled and falls back to `std/logging` otherwise. Structured fields are passed
-through to Chronicles; non-structured backends receive a flattened message such
-as `request complete route=/items/42 status=200 elapsedMs=12.5`.
 
 Error handling is automatic for TAPIS routes:
 
