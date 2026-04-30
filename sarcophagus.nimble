@@ -1,7 +1,7 @@
 version       = "0.9.1"
 author        = "Jaremy Creechley"
 description   = "mummy higher level api wrapper"
-license       = "BSD-2-Clause"
+license       = "Apache-2.0"
 srcDir        = "src"
 
 requires "nim >= 2.0.0"
