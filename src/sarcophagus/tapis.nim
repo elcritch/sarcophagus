@@ -2,6 +2,7 @@ import std/[json, macros, options, strutils]
 
 import mummy
 import mummy/routers
+import chroniclers
 
 import ./core/[swagger, typed_api]
 from ./oauth2/core import
@@ -352,6 +353,24 @@ proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =
   ## Converts an exception to a negotiated TAPIS error response.
   let statusCode = apiErrorStatus(e)
   let body = apiErrorBody(e, config)
+  if statusCode >= 500:
+    error "tapis request failed",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      uri = request.uri,
+      statusCode = statusCode,
+      errorCode = apiErrorCode(e),
+      exception = e.name,
+      message = e.msg
+  else:
+    warn "tapis request rejected",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      uri = request.uri,
+      statusCode = statusCode,
+      errorCode = apiErrorCode(e),
+      exception = e.name,
+      message = e.msg
   let format =
     try:
       responseFormat(request, config)

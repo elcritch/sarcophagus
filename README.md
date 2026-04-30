@@ -1,6 +1,12 @@
 # Sarcophagus
 
-Sarcophagus is a FastAPI inspired higher-level API layer for [Mummy](https://github.com/guzba/mummy). Its TAPIS modules turn typed Nim procs into HTTP handlers, JSON/CBOR codecs, OpenAPI route metadata, and OAuth2-protected endpoints.
+Sarcophagus is a FastAPI inspired higher-level API layer for [Mummy](https://github.com/guzba/mummy).
+
+It enables writing REST & JSON APIs for Mummy web server using Nim types that are automatically parsed for you. Sarcophagus calls these "TAPIS" short for typed APIs.
+
+The Nim types can be encoded/decorded using JSON, CBOR, or MSGPACK. The typed apis are used to create OpenAPI route metadata and to produce a `swagger.json` docs for you. Swagger examples can be added to the endpoints as well. Other non-JSON/CBOR/SGPACK endpoints can also be added.
+
+Sarcophagus also provides security helpers to make OAuth2-protected API endpoints. This uses JWT tokens. These can be used directly with Mummy in addition to Sarcophagus typed APIs.
 
 ## Installation
 
@@ -15,8 +21,9 @@ Note, `jwt` can cause issues during installation. Add `requires "jwt >= 0.3"` to
 ## Logging
 
 Sarcophagus uses [Chroniclers](https://github.com/elcritch/chroniclers) for
-logging facade support. To compile out Chroniclers log calls in an application,
-build with:
+logging facade support. TAPIS logs handled route errors by default with the
+request method, path, response status, error code, exception type, and message.
+To compile out Chroniclers log calls in an application, build with:
 
 ```sh
 nim c -d:chroniclersLogBackend=none app.nim
