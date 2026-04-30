@@ -1,6 +1,7 @@
 import std/[base64, json, options, sets, strutils, tables, times]
 
 import jwt
+import chroniclers
 
 type
   SigningKey* = object
@@ -190,6 +191,12 @@ proc constantTimeEquals(lhs: string, rhs: string): bool =
   diff == 0
 
 proc failure(statusCode: int, code: string, message: string): TokenValidationResult =
+  if statusCode == 403:
+    notice "bearer token rejected",
+      statusCode = statusCode, code = code, message = message
+  else:
+    debug "bearer token rejected",
+      statusCode = statusCode, code = code, message = message
   TokenValidationResult(
     ok: false,
     failure:
@@ -197,6 +204,11 @@ proc failure(statusCode: int, code: string, message: string): TokenValidationRes
   )
 
 proc success(claims: BearerTokenClaims): TokenValidationResult =
+  debug "bearer token accepted",
+    subject = claims.subject,
+    keyId = claims.keyId,
+    scopeCount = claims.scopes.len,
+    expiresAt = claims.expiresAt
   TokenValidationResult(ok: true, claims: claims)
 
 proc jsonStringClaim(payload: JsonNode, key: string): Option[string] =
@@ -308,6 +320,13 @@ proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string 
   let signature = hmacSha256(signingInput, config.keys[config.activeKid])
   let signaturePart = base64UrlEncodeBytes(signature)
 
+  info "bearer token minted",
+    subject = spec.subject.strip(),
+    keyId = config.activeKid,
+    scopeCount = spec.scopes.len,
+    ttlSeconds = spec.expiresAt - spec.issuedAt,
+    hasTokenId = spec.tokenId.strip().len > 0
+
   signingInput & "." & signaturePart
 
 proc validateBearerToken*(
@@ -317,6 +336,8 @@ proc validateBearerToken*(
     now = nowUnix(),
 ): TokenValidationResult =
   let trimmedToken = token.strip()
+  trace "validating bearer token",
+    tokenPresent = trimmedToken.len > 0, requiredScopeCount = requiredScopes.len
   if trimmedToken.len == 0:
     return failure(401, "missing_token", "Missing bearer token")
 

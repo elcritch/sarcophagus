@@ -1,5 +1,7 @@
 import std/[options, sets, strutils]
 
+import chroniclers
+
 import ../core/jwt_bearer_tokens
 import ./secret_hashing
 
@@ -313,9 +315,17 @@ proc verifyPasswordLoginAccount*(
 ): Option[PasswordLoginUser] =
   ## Verifies a password against a loaded account's encoded hash.
   if not account.enabled:
+    notice "password login account disabled",
+      username = account.username, subject = account.subject
     return none(PasswordLoginUser)
   if not verifySecret(password, account.passwordHash, policy):
+    debug "password login account secret mismatch",
+      username = account.username, subject = account.subject
     return none(PasswordLoginUser)
+  debug "password login account verified",
+    username = account.username,
+    subject = account.subject,
+    scopeCount = account.scopes.len
   some(account.toPasswordLoginUser())
 
 proc passwordLoginVerifier*(
@@ -323,8 +333,10 @@ proc passwordLoginVerifier*(
 ): PasswordLoginVerifier =
   ## Creates a verifier callback from an account-loader callback.
   result = proc(username, password: string): Option[PasswordLoginUser] {.gcsafe.} =
+    trace "loading password login account", username = username.strip()
     let account = loadAccount(username.strip())
     if account.isNone:
+      debug "password login account not found", username = username.strip()
       return none(PasswordLoginUser)
     verifyPasswordLoginAccount(account.get(), password, policy)
 
@@ -344,13 +356,36 @@ proc authenticatePasswordLogin*(
     now = nowUnix(),
 ): PasswordLoginResult =
   ## Verifies username/password credentials and mints a signed login session.
+  trace "authenticating password login",
+    username = username.strip(),
+    tenant = context.tenant,
+    requestId = context.requestId,
+    remoteAddressPresent = context.remoteAddress.len > 0,
+    userAgentPresent = context.userAgent.len > 0
   if username.strip().len == 0 or password.len == 0:
+    notice "password login denied",
+      usernamePresent = username.strip().len > 0,
+      reason = "missing_credentials",
+      tenant = context.tenant,
+      requestId = context.requestId
     return failure(401, "invalid_credentials", "Username or password is invalid")
 
   let decision = verifyCredentials(context, username, password)
   if decision.kind != passwordLoginAllowed:
+    notice "password login denied",
+      username = username.strip(),
+      decision = $decision.kind,
+      statusCode = decision.statusCode,
+      code = decision.code,
+      retryAfterSeconds = decision.retryAfterSeconds,
+      tenant = context.tenant,
+      requestId = context.requestId
     return failure(decision)
   if decision.user.subject.strip().len == 0:
+    error "password login verifier returned invalid user",
+      username = username.strip(),
+      tenant = context.tenant,
+      requestId = context.requestId
     return failure(500, "invalid_user", "Verifier returned an invalid user")
 
   let token = mintBearerToken(
@@ -363,6 +398,13 @@ proc authenticatePasswordLogin*(
     ),
   )
 
+  info "password login succeeded",
+    username = username.strip(),
+    subject = decision.user.subject,
+    scopeCount = decision.user.scopes.len,
+    expiresAt = now + int64(config.sessionTtlSeconds),
+    tenant = context.tenant,
+    requestId = context.requestId
   PasswordLoginResult(
     ok: true,
     user: decision.user,
@@ -399,14 +441,25 @@ proc validatePasswordLoginSession*(
     config: PasswordLoginConfig, sessionToken: string, now = nowUnix()
 ): PasswordLoginSessionResult =
   ## Validates a signed login session token.
+  trace "validating password login session",
+    tokenPresent = sessionToken.strip().len > 0,
+    requiredScopeCount = config.sessionScopes.len
   let validation = validateBearerToken(
     config.sessionConfig, sessionToken, config.sessionScopes, now = now
   )
   if not validation.ok:
+    notice "password login session rejected",
+      statusCode = validation.failure.statusCode,
+      code = validation.failure.code,
+      message = validation.failure.message
     return sessionFailure(
       validation.failure.statusCode, validation.failure.code, validation.failure.message
     )
 
+  debug "password login session accepted",
+    subject = validation.claims.subject,
+    scopeCount = validation.claims.scopes.len,
+    expiresAt = validation.claims.expiresAt
   PasswordLoginSessionResult(
     ok: true,
     session: PasswordLoginSession(

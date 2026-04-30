@@ -1,6 +1,7 @@
 import std/macros
 
 import mummy
+import chroniclers
 
 import ./core/tapis_security
 from ./oauth2/mummy_support import requireOAuth2BearerAuth
@@ -21,8 +22,16 @@ proc secureRequestHandler*(
     let config = security.oauth2Config
     let scopes = security.requiredScopes
     return proc(request: Request) {.gcsafe.} =
+      trace "enforcing tapis oauth2 security",
+        httpMethod = request.httpMethod,
+        path = request.path,
+        requiredScopeCount = scopes.len
       if not requireOAuth2BearerAuth(request, config, scopes):
         return
+      debug "tapis oauth2 security passed",
+        httpMethod = request.httpMethod,
+        path = request.path,
+        requiredScopeCount = scopes.len
       wrapped(request)
 
 const scopedSecurityRouteNames =

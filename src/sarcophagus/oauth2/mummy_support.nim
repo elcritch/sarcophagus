@@ -2,6 +2,7 @@ import std/[macros, options, strutils]
 
 import mummy
 import mummy/routers
+import chroniclers
 
 import ../core/jwt_bearer_tokens
 import ../tapis_utils
@@ -43,7 +44,14 @@ proc oauth2TokenHandler*(
   ## `oauth2/core.issueClientCredentialsToken` and supports HTTP Basic,
   ## form-body, and JSON-body client authentication.
   return proc(request: Request) {.gcsafe.} =
+    trace "oauth2 token endpoint request",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      contentType = request.headers["Content-Type"],
+      authorizationHeaderPresent = request.headers["Authorization"].strip().len > 0
     if request.httpMethod != "POST":
+      warn "oauth2 token endpoint method rejected",
+        httpMethod = request.httpMethod, path = request.path, allow = "POST"
       request.respondTypedApiValue(oauth2MethodNotAllowedResponse("POST"))
       return
 
@@ -55,10 +63,20 @@ proc oauth2TokenHandler*(
     )
 
     if not tokenResult.ok:
+      notice "oauth2 token endpoint denied",
+        path = request.path,
+        statusCode = tokenResult.failure.statusCode,
+        error = tokenResult.failure.error,
+        errorDescription = tokenResult.failure.errorDescription
       request.respondTypedApiValue(onError(tokenResult.failure))
       return
 
     let tokenResponse = tokenResult.response
+    info "oauth2 token endpoint issued token",
+      path = request.path,
+      tokenType = tokenResponse.tokenType,
+      expiresIn = tokenResponse.expiresIn,
+      scope = tokenResponse.scope
     request.respondTypedApiValue(
       apiResponse(
         tokenResponse.to(OAuth2TokenPayload),
@@ -74,7 +92,14 @@ proc oauth2TokenHandler*(
 ): RequestHandler =
   ## Returns a Mummy handler for client-credentials and authorization-code tokens.
   return proc(request: Request) {.gcsafe.} =
+    trace "oauth2 token endpoint request",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      contentType = request.headers["Content-Type"],
+      authorizationHeaderPresent = request.headers["Authorization"].strip().len > 0
     if request.httpMethod != "POST":
+      warn "oauth2 token endpoint method rejected",
+        httpMethod = request.httpMethod, path = request.path, allow = "POST"
       request.respondTypedApiValue(oauth2MethodNotAllowedResponse("POST"))
       return
 
@@ -87,10 +112,20 @@ proc oauth2TokenHandler*(
     )
 
     if not tokenResult.ok:
+      notice "oauth2 token endpoint denied",
+        path = request.path,
+        statusCode = tokenResult.failure.statusCode,
+        error = tokenResult.failure.error,
+        errorDescription = tokenResult.failure.errorDescription
       request.respondTypedApiValue(onError(tokenResult.failure))
       return
 
     let tokenResponse = tokenResult.response
+    info "oauth2 token endpoint issued token",
+      path = request.path,
+      tokenType = tokenResponse.tokenType,
+      expiresIn = tokenResponse.expiresIn,
+      scope = tokenResponse.scope
     request.respondTypedApiValue(
       apiResponse(
         tokenResponse.to(OAuth2TokenPayload),
@@ -117,17 +152,27 @@ proc oauth2AuthorizeHandler*(
   ## The handler expects an application-owned session callback. When no user is
   ## logged in, it redirects to `loginUrl` with a `next` parameter.
   return proc(request: Request) {.gcsafe.} =
+    trace "oauth2 authorization endpoint request",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      clientIdPresent = request.queryParams["client_id"].strip().len > 0,
+      responseType = request.queryParams["response_type"]
     if request.httpMethod != "GET":
+      warn "oauth2 authorization endpoint method rejected",
+        httpMethod = request.httpMethod, path = request.path, allow = "GET"
       request.respondTypedApiValue(oauth2MethodNotAllowedResponse("GET"))
       return
 
     let user = currentUser(request.headers.mummyToApiHeaders())
     if user.isNone:
+      info "oauth2 authorization login required", path = request.path
       request.redirect(loginUrl.appendQueryParam("next", request.uri))
       return
 
     let responseType = request.queryParams["response_type"]
     if responseType != "code":
+      notice "oauth2 authorization response type rejected",
+        path = request.path, responseType = responseType
       request.respondTypedApiValue(
         onError(
           OAuth2Failure(
@@ -152,6 +197,12 @@ proc oauth2AuthorizeHandler*(
     )
 
     if not authorizeResult.ok:
+      notice "oauth2 authorization endpoint denied",
+        path = request.path,
+        subject = user.get().subject,
+        statusCode = authorizeResult.failure.statusCode,
+        error = authorizeResult.failure.error,
+        errorDescription = authorizeResult.failure.errorDescription
       request.respondTypedApiValue(onError(authorizeResult.failure))
       return
 
@@ -161,6 +212,11 @@ proc oauth2AuthorizeHandler*(
     let state = request.queryParams["state"]
     if state.len > 0:
       location = location.appendQueryParam("state", state)
+    info "oauth2 authorization endpoint issued code",
+      path = request.path,
+      subject = user.get().subject,
+      clientId = authorizeResult.authorizationCode.clientId,
+      scopeCount = authorizeResult.authorizationCode.scopes.len
     request.redirect(location)
 
 proc registerOAuth2AuthorizationCode*(
@@ -186,7 +242,26 @@ proc validateOAuth2BearerRequest*(
     request: Request, config: OAuth2Config, requiredScopes: openArray[string] = []
 ): OAuth2ResourceResult {.gcsafe.} =
   ## Validates the request's `Authorization: Bearer ...` token and scopes.
-  validateOAuth2BearerToken(config, request.headers["Authorization"], requiredScopes)
+  trace "validating oauth2 bearer request",
+    httpMethod = request.httpMethod,
+    path = request.path,
+    authorizationHeaderPresent = request.headers["Authorization"].strip().len > 0,
+    requiredScopeCount = requiredScopes.len
+  result =
+    validateOAuth2BearerToken(config, request.headers["Authorization"], requiredScopes)
+  if result.ok:
+    debug "oauth2 bearer request authorized",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      subject = result.claims.subject,
+      scopeCount = result.claims.scopes.len
+  else:
+    notice "oauth2 bearer request denied",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      statusCode = result.failure.statusCode,
+      error = result.failure.error,
+      errorDescription = result.failure.errorDescription
 
 proc validateOAuth2BearerRequest*(
     request: Request, config: OAuth2Config, requiredClaims: openArray[OAuth2ScopeClaim]
@@ -245,6 +320,10 @@ proc oauth2*(
     if not validation.ok:
       request.respondTypedApiValue(onError(validation.failure))
       return
+    debug "oauth2 protected handler authorized",
+      path = request.path,
+      subject = validation.claims.subject,
+      scopeCount = validation.claims.scopes.len
     wrapped(request, validation.claims)
 
 proc oauth2*(

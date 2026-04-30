@@ -1,5 +1,7 @@
 import std/[base64, json, options, strutils, tables]
 
+import chroniclers
+
 import ../core/jwt_bearer_tokens
 import ../security/secret_hashing
 import ./core
@@ -282,6 +284,13 @@ proc auditAttempt(
     tokenId = "",
 ) =
   try:
+    trace "hashed oauth2 audit event",
+      eventType = if success: "token_minted" else: "token_denied",
+      clientId = clientId,
+      success = success,
+      reason = reason,
+      scope = scope,
+      hasTokenId = tokenId.len > 0
     onAudit(
       HashedOAuth2AuditEvent(
         eventType: if success: "token_minted" else: "token_denied",
@@ -292,8 +301,9 @@ proc auditAttempt(
         tokenId: tokenId,
       )
     )
-  except CatchableError:
-    discard
+  except CatchableError as e:
+    warn "hashed oauth2 audit callback failed",
+      clientId = clientId, reason = reason, message = e.msg
 
 proc resolveScopes(
     client: HashedOAuth2Client, requestedScopeParam: string
@@ -337,6 +347,10 @@ proc issueHashedClientCredentialsToken*(
   ## This mirrors `oauth2/core.issueClientCredentialsToken`, but retrieves the
   ## client through `loadClient` and verifies `client_secret` with
   ## `verifySecret` instead of comparing a stored plaintext secret.
+  trace "issuing hashed oauth2 client credentials token",
+    contentType = contentType,
+    authorizationHeaderPresent = authorizationHeader.strip().len > 0,
+    requestBodyLength = requestBody.len
   if not isFormUrlEncodedContentType(contentType) and not isJsonContentType(contentType):
     return tokenFailure(
       400, "invalid_request",
@@ -414,12 +428,16 @@ proc issueHashedClientCredentialsToken*(
   let loadedClient =
     try:
       loadClient(effectiveClientId)
-    except CatchableError:
+    except CatchableError as e:
+      error "hashed oauth2 client load failed",
+        clientId = effectiveClientId, message = e.msg
       none(HashedOAuth2Client)
 
   if loadedClient.isNone():
     verifyDummySecret(clientSecret, policy)
     auditAttempt(onAudit, effectiveClientId, false, "unknown_client")
+    notice "hashed oauth2 client authentication failed",
+      clientId = effectiveClientId, reason = "unknown_client"
     return tokenFailure(
       401,
       "invalid_client",
@@ -431,6 +449,8 @@ proc issueHashedClientCredentialsToken*(
   if not client.enabled:
     verifyDummySecret(clientSecret, policy)
     auditAttempt(onAudit, effectiveClientId, false, "disabled_client")
+    notice "hashed oauth2 client authentication failed",
+      clientId = effectiveClientId, reason = "disabled_client"
     return tokenFailure(
       401,
       "invalid_client",
@@ -440,6 +460,8 @@ proc issueHashedClientCredentialsToken*(
 
   if not verifySecret(clientSecret, client.secretHash, policy):
     auditAttempt(onAudit, effectiveClientId, false, "invalid_client")
+    notice "hashed oauth2 client authentication failed",
+      clientId = effectiveClientId, reason = "invalid_secret"
     return tokenFailure(
       401,
       "invalid_client",
@@ -456,6 +478,8 @@ proc issueHashedClientCredentialsToken*(
       "invalid_scope",
       scopeListToString(requestedScopes),
     )
+    notice "hashed oauth2 client credentials scope rejected",
+      clientId = effectiveClientId, requestedScope = scopeListToString(requestedScopes)
     return tokenFailure(
       400, "invalid_scope", "The requested scope is invalid for this client"
     )
@@ -479,6 +503,12 @@ proc issueHashedClientCredentialsToken*(
 
   let scope = scopeListToString(requestedScopes)
   auditAttempt(onAudit, effectiveClientId, true, "ok", scope, tokenId)
+  info "hashed oauth2 client credentials token issued",
+    clientId = effectiveClientId,
+    subject = if client.subject.strip().len > 0: client.subject else: client.clientId,
+    scope = scope,
+    ttlSeconds = ttlSeconds,
+    hasTokenId = tokenId.len > 0
   tokenSuccess(
     OAuth2TokenResponse(
       accessToken: token, tokenType: "Bearer", expiresIn: ttlSeconds, scope: scope
