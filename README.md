@@ -29,8 +29,8 @@ To compile out Chroniclers log calls in an application, build with:
 nim c -d:chroniclersLogBackend=none app.nim
 ```
 
-Use `-d:chroniclersLogBackend=std` for Nim's `std/logging`, or enable
-Sarcophagus' `chronicles` feature to route Chroniclers through Chronicles.
+Use `-d:chroniclersLogBackend=std` for Nim's `std/logging`, or install 
+Sarcophagus with the `chronicles` feature to use Chronicles (recommended) using `requires "sarcophagus[chronciles]"` in your Nimble file.
 
 ## Basic Example
 
