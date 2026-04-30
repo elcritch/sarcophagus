@@ -22,3 +22,5 @@ feature "jsony":
 feature "msgpack":
   requires "msgpack4nim"
 
+feature "chronicles":
+  requires "chronicles"

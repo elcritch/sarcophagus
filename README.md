@@ -221,6 +221,24 @@ By default, TAPIS supports JSON. Compile with `-d:feature.sarcophagus.cbor` or
 `-d:feature.sarcophagus.msgpack` to enable CBOR or MessagePack request/response
 negotiation.
 
+## `sarcophagus/logging`
+
+`sarcophagus/logging` provides a small structured logging facade that can route
+to Chronicles, Nim's `std/logging`, or no logging at compile time.
+
+```nim
+import sarcophagus/logging
+
+info "request complete", route = "/items/42", status = 200, elapsedMs = 12.5
+warn "request slow", route = "/items/42", elapsedMs = 450
+```
+
+Select the backend with `-d:sarcophagusLogBackend=chronicles|std|none`. If it is
+not set, Sarcophagus uses Chronicles when `feature.sarcophagus.chronicles` is
+enabled and falls back to `std/logging` otherwise. Structured fields are passed
+through to Chronicles; non-structured backends receive a flattened message such
+as `request complete route=/items/42 status=200 elapsedMs=12.5`.
+
 Error handling is automatic for TAPIS routes:
 
 - `ApiError` uses its explicit status, code, message, and details.
