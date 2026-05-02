@@ -24,4 +24,4 @@ feature "msgpack":
   requires "msgpack4nim"
 
 feature "chronicles":
-  requires "https://github.com/elcritch/chroniclers[chronicles] >= 0.2.1"
+  requires "chroniclers[chronicles] >= 0.2.1"
