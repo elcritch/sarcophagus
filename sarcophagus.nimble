@@ -1,4 +1,4 @@
-version       = "0.10.1"
+version       = "0.10.2"
 author        = "Jaremy Creechley"
 description   = "mummy higher level api wrapper"
 license       = "Apache-2.0"
