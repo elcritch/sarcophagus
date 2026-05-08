@@ -241,6 +241,14 @@ By default, TAPIS supports JSON. Compile with `-d:feature.sarcophagus.cbor` or
 `-d:feature.sarcophagus.msgpack` to enable CBOR or MessagePack request/response
 negotiation.
 
+TAPIS transparently compresses large typed, raw, error, and OpenAPI responses
+when the request `Accept-Encoding` allows `gzip` or `deflate`. It sets
+`Content-Encoding`, `Vary: Accept-Encoding`, and the compressed `Content-Length`,
+including for `HEAD` responses. Mummy also has response compression; TAPIS sets
+`Content-Encoding` before handing the response to Mummy, so Mummy will not
+double-compress TAPIS responses. Raw Mummy handlers registered on `api.router`
+continue to use Mummy's own compression behavior.
+
 Error handling is automatic for TAPIS routes:
 
 - `ApiError` uses its explicit status, code, message, and details.
