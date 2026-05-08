@@ -1,7 +1,8 @@
-import std/[httpclient, json, options, random, unittest]
+import std/[httpclient, json, net, options, random, strutils, unittest]
 
 import mummy
 import mummy/routers
+import zippy
 
 import sarcophagus/tapis
 
@@ -39,6 +40,9 @@ type
     count*: int
     verbose*: bool
     mode*: string
+
+  BigOut = object
+    text*: string
 
 proc serveServer(args: ServerThreadArgs) {.thread.} =
   args.server.serve(args.port, address = args.address)
@@ -183,6 +187,12 @@ proc apiErrorHandler(): ItemOut {.gcsafe.} =
 proc htmlDocs(): RawResponse["text/html"] {.gcsafe.} =
   htmlResponse("<!DOCTYPE html><h1>Docs</h1>")
 
+proc largeJson(): BigOut {.gcsafe.} =
+  BigOut(text: "sarcophagus gzip json ".repeat(80))
+
+proc largeText(): RawResponse["text/plain"] {.gcsafe.} =
+  textResponse("sarcophagus gzip payload ".repeat(80))
+
 proc rawMummyStatus(request: Request) {.gcsafe.} =
   var headers: mummy.HttpHeaders
   headers["Content-Type"] = "application/json; charset=utf-8"
@@ -258,8 +268,42 @@ proc buildApi(includeStackTraces = false): ApiRouter =
   api.get("/value-error", valueErrorHandler)
   api.get("/api-error", apiErrorHandler)
   api.get("/docs", htmlDocs, summary = "HTML docs")
+  api.get("/large-json", largeJson, summary = "Large JSON")
+  api.get("/large-text", largeText, summary = "Large text")
+  api.head("/large-text", largeText, summary = "Large text headers")
   api.mountOpenApi()
   api
+
+proc readRawHttpResponse(port: Port, request: string): string =
+  var socket = newSocket()
+  defer:
+    socket.close()
+  socket.connect("127.0.0.1", port)
+  socket.send(request)
+  while true:
+    let chunk = socket.recv(4096)
+    if chunk.len == 0:
+      break
+    result.add(chunk)
+
+proc responseHeader(raw, name: string): string =
+  let headerEnd = raw.find("\r\n\r\n")
+  if headerEnd < 0:
+    return ""
+  for line in raw[0 ..< headerEnd].split("\r\n"):
+    let colon = line.find(':')
+    if colon > 0 and cmpIgnoreCase(line[0 ..< colon], name) == 0:
+      return line[colon + 1 .. ^1].strip()
+
+proc responseBody(raw: string): string =
+  let headerEnd = raw.find("\r\n\r\n")
+  if headerEnd >= 0:
+    raw[headerEnd + 4 .. ^1]
+  else:
+    ""
+
+proc portFromBaseUrl(baseUrl: string): Port =
+  Port(parseInt(baseUrl.rsplit(":", 1)[1]))
 
 proc withTestServer(body: proc(baseUrl: string) {.gcsafe.}) =
   randomize()
@@ -319,6 +363,98 @@ suite "typed mummy tapis":
       check response.code.int == 200
       check response.headers["Content-Type"] == "text/html"
       check response.body == "<!DOCTYPE html><h1>Docs</h1>"
+
+  test "gzip compresses large typed responses when accepted":
+    withTestServer do(baseUrl: string):
+      let port = portFromBaseUrl(baseUrl)
+      let raw = readRawHttpResponse(
+        port,
+        "GET /large-text HTTP/1.1\r\n" & "Host: 127.0.0.1\r\n" &
+          "Accept-Encoding: gzip\r\n" & "Connection: close\r\n\r\n",
+      )
+
+      check raw.startsWith("HTTP/1.1 200")
+      check responseHeader(raw, "Content-Type") == "text/plain"
+      check responseHeader(raw, "Content-Encoding") == "gzip"
+      check responseHeader(raw, "Vary") == "Accept-Encoding"
+      check uncompress(responseBody(raw), dfGzip) ==
+        "sarcophagus gzip payload ".repeat(80)
+
+  test "gzip compresses large typed json responses when accepted":
+    withTestServer do(baseUrl: string):
+      let port = portFromBaseUrl(baseUrl)
+      let raw = readRawHttpResponse(
+        port,
+        "GET /large-json HTTP/1.1\r\n" & "Host: 127.0.0.1\r\n" &
+          "Accept: application/json\r\n" & "Accept-Encoding: gzip\r\n" &
+          "Connection: close\r\n\r\n",
+      )
+
+      check raw.startsWith("HTTP/1.1 200")
+      check responseHeader(raw, "Content-Type") == jsonContentType
+      check responseHeader(raw, "Content-Encoding") == "gzip"
+      let body = parseJson(uncompress(responseBody(raw), dfGzip))
+      check body["text"].getStr() == "sarcophagus gzip json ".repeat(80)
+
+  test "deflate compresses large typed responses when gzip is unavailable":
+    withTestServer do(baseUrl: string):
+      let port = portFromBaseUrl(baseUrl)
+      let raw = readRawHttpResponse(
+        port,
+        "GET /large-text HTTP/1.1\r\n" & "Host: 127.0.0.1\r\n" &
+          "Accept-Encoding: deflate\r\n" & "Connection: close\r\n\r\n",
+      )
+
+      check raw.startsWith("HTTP/1.1 200")
+      check responseHeader(raw, "Content-Encoding") == "deflate"
+      check responseHeader(raw, "Vary") == "Accept-Encoding"
+      check uncompress(responseBody(raw), dfDeflate) ==
+        "sarcophagus gzip payload ".repeat(80)
+
+  test "does not gzip when the request opts out":
+    withTestServer do(baseUrl: string):
+      let port = portFromBaseUrl(baseUrl)
+      let raw = readRawHttpResponse(
+        port,
+        "GET /large-text HTTP/1.1\r\n" & "Host: 127.0.0.1\r\n" &
+          "Accept-Encoding: gzip;q=0\r\n" & "Connection: close\r\n\r\n",
+      )
+
+      check raw.startsWith("HTTP/1.1 200")
+      check responseHeader(raw, "Content-Encoding") == ""
+      check responseBody(raw) == "sarcophagus gzip payload ".repeat(80)
+
+  test "HEAD advertises gzip metadata without a response body":
+    withTestServer do(baseUrl: string):
+      let port = portFromBaseUrl(baseUrl)
+      let raw = readRawHttpResponse(
+        port,
+        "HEAD /large-text HTTP/1.1\r\n" & "Host: 127.0.0.1\r\n" &
+          "Accept-Encoding: gzip\r\n" & "Connection: close\r\n\r\n",
+      )
+
+      check raw.startsWith("HTTP/1.1 200")
+      check responseHeader(raw, "Content-Encoding") == "gzip"
+      let compressedLength = parseInt(responseHeader(raw, "Content-Length"))
+      check compressedLength > 0
+      check compressedLength < "sarcophagus gzip payload ".repeat(80).len
+      check responseBody(raw) == ""
+
+  test "HEAD advertises deflate metadata without a response body":
+    withTestServer do(baseUrl: string):
+      let port = portFromBaseUrl(baseUrl)
+      let raw = readRawHttpResponse(
+        port,
+        "HEAD /large-text HTTP/1.1\r\n" & "Host: 127.0.0.1\r\n" &
+          "Accept-Encoding: deflate\r\n" & "Connection: close\r\n\r\n",
+      )
+
+      check raw.startsWith("HTTP/1.1 200")
+      check responseHeader(raw, "Content-Encoding") == "deflate"
+      let compressedLength = parseInt(responseHeader(raw, "Content-Length"))
+      check compressedLength > 0
+      check compressedLength < "sarcophagus gzip payload ".repeat(80).len
+      check responseBody(raw) == ""
 
   test "converts typed handlers to plain mummy handlers":
     randomize()

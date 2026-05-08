@@ -1,8 +1,9 @@
-import std/[json, macros, options, strutils]
+import std/[json, macros, options, parseutils, strutils]
 
 import mummy
 import mummy/routers
 import chroniclers
+import zippy
 
 import ./core/[swagger, typed_api]
 from ./oauth2/core import
@@ -69,6 +70,97 @@ proc toHttpHeaders(headers: ApiHeaders): HttpHeaders =
   for header in headers:
     result[header.name] = header.value
 
+proc parseQValue(value: string): float =
+  let trimmed = value.strip()
+  if trimmed.len == 0:
+    return 1.0
+  var parsed = 0.0
+  if parseFloat(trimmed, parsed) == trimmed.len: parsed else: 0.0
+
+proc headerAcceptsToken(headers: HttpHeaders, key, token: string): bool =
+  ## Parses comma-separated HTTP header tokens and honors q=0 opt-outs.
+  for (headerKey, headerValue) in headers:
+    if cmpIgnoreCase(headerKey, key) != 0:
+      continue
+    for rawPart in headerValue.split(','):
+      let part = rawPart.strip()
+      if part.len == 0:
+        continue
+      let semicolon = part.find(';')
+      let value =
+        if semicolon >= 0:
+          part[0 ..< semicolon].strip()
+        else:
+          part
+      if cmpIgnoreCase(value, token) != 0:
+        continue
+
+      var q = 1.0
+      if semicolon >= 0:
+        for rawParam in part[semicolon + 1 .. ^1].split(';'):
+          let param = rawParam.strip()
+          let eq = param.find('=')
+          if eq > 0 and cmpIgnoreCase(param[0 ..< eq].strip(), "q") == 0:
+            q = parseQValue(param[eq + 1 .. ^1])
+      if q > 0.0:
+        return true
+
+proc appendHeaderToken(headers: var HttpHeaders, key, token: string) =
+  if key in headers:
+    for i in 0 ..< headers.toBase.len:
+      let headerValue = headers.toBase[i][1]
+      if cmpIgnoreCase(headers.toBase[i][0], key) == 0:
+        for part in headerValue.split(','):
+          if cmpIgnoreCase(part.strip(), token) == 0:
+            return
+        headers.toBase[i][1] = headerValue & ", " & token
+        return
+  headers[key] = token
+
+type ContentEncoding = enum
+  contentEncodingGzip
+  contentEncodingDeflate
+
+proc responseContentEncoding(request: Request): Option[ContentEncoding] =
+  if request.headers.headerAcceptsToken("Accept-Encoding", "gzip"):
+    return some(contentEncodingGzip)
+  if request.headers.headerAcceptsToken("Accept-Encoding", "deflate"):
+    return some(contentEncodingDeflate)
+
+proc compressResponse(
+    request: Request, statusCode: int, headers: var HttpHeaders, body: var string
+) =
+  if body.len <= 860:
+    return
+  if statusCode == 204 or (statusCode >= 100 and statusCode < 200):
+    return
+  if "Content-Encoding" in headers:
+    return
+
+  let encoding = responseContentEncoding(request)
+  if encoding.isNone():
+    return
+
+  try:
+    case encoding.get()
+    of contentEncodingGzip:
+      body = compress(body.cstring, body.len, BestSpeed, dfGzip)
+      headers["Content-Encoding"] = "gzip"
+    of contentEncodingDeflate:
+      body = compress(body.cstring, body.len, BestSpeed, dfDeflate)
+      headers["Content-Encoding"] = "deflate"
+    headers.appendHeaderToken("Vary", "Accept-Encoding")
+    headers["Content-Length"] = $body.len
+  except CatchableError as e:
+    discard e
+    trace "tapis response compression failed",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      uri = request.uri,
+      statusCode = statusCode,
+      exception = e.name,
+      message = e.msg
+
 proc requestFormat(request: Request, config: ApiConfig): ApiFormat =
   typed_api.requestFormat(request.headers["Content-Type"], config)
 
@@ -84,12 +176,14 @@ proc respondEncoded(
 ) =
   var responseHeaders = headers
   responseHeaders["Content-Type"] = formatContentType(format)
+  compressResponse(request, statusCode, responseHeaders, body)
   trace "tapis response encoded",
     httpMethod = request.httpMethod,
     path = request.path,
     uri = request.uri,
     statusCode = statusCode,
     contentType = responseHeaders["Content-Type"],
+    contentEncoding = responseHeaders["Content-Encoding"],
     bodyLength = body.len
   if request.httpMethod == "HEAD":
     responseHeaders["Content-Length"] = $body.len
@@ -132,12 +226,14 @@ proc respondRaw[contentType: static string](
 ) =
   var headers = value.headers.toHttpHeaders()
   headers["Content-Type"] = contentType
-  traceTapisRawResponse(request, value.statusCode, contentType, value.body.len)
+  var body = value.body
+  compressResponse(request, value.statusCode, headers, body)
+  traceTapisRawResponse(request, value.statusCode, contentType, body.len)
   if request.httpMethod == "HEAD":
-    headers["Content-Length"] = $value.body.len
+    headers["Content-Length"] = $body.len
     request.respond(value.statusCode, headers)
   else:
-    request.respond(value.statusCode, headers, value.body)
+    request.respond(value.statusCode, headers, body)
 
 proc respondRouteValue[T](
     request: Request, value: T, config: ApiConfig, responseStatus: int
@@ -1117,18 +1213,21 @@ proc openApiHandler*(api: ApiRouter): RequestHandler =
     var headers: HttpHeaders
     headers["Content-Type"] = jsonContentType
     let body = $api.openApiJson()
+    var responseBody = body
+    compressResponse(request, 200, headers, responseBody)
     trace "tapis openapi response",
       httpMethod = request.httpMethod,
       path = request.path,
       uri = request.uri,
       statusCode = 200,
       contentType = headers["Content-Type"],
-      bodyLength = body.len
+      contentEncoding = headers["Content-Encoding"],
+      bodyLength = responseBody.len
     if request.httpMethod == "HEAD":
-      headers["Content-Length"] = $body.len
+      headers["Content-Length"] = $responseBody.len
       request.respond(200, headers)
     else:
-      request.respond(200, headers, body)
+      request.respond(200, headers, responseBody)
 
 proc mountOpenApi*(api: ApiRouter, path = "/swagger.json") =
   ## Mounts the OpenAPI JSON handler at `path`.
