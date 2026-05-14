@@ -1,4 +1,5 @@
-<img width="1801" height="873" alt="ig_0b408a98a03cfaf8016a06518edc588191b79fa6426c91c04a" src="https://github.com/user-attachments/assets/997731bc-8cf9-4233-947f-03ed5db7b53a" />
+<img width="1801" height="873" alt="ig_0b408a98a03cfaf8016a06555f5cb081919910ce1ee37af06b" src="https://github.com/user-attachments/assets/d7cdfaa9-cae4-4b06-8158-ee0a6c1cd4cf" />
+
 
 Sarcophagus is a FastAPI inspired higher-level API layer for [Mummy](https://github.com/guzba/mummy).
 
