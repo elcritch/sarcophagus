@@ -1,11 +1,11 @@
-import std/[json, macros, options, parseutils, strutils]
+import std/[json, macros, monotimes, options, parseutils, strutils, sysrand]
 
 import mummy
 import mummy/routers
 import chroniclers
 import zippy
 
-import ./core/[swagger, typed_api]
+import ./core/[swagger, tapis_runtime, typed_api]
 from ./oauth2/core import
   OAuth2AuthorizationCodeConsumer, OAuth2AuthorizationCodeSaver, OAuth2Config
 from ./oauth2/common import OAuth2CurrentUserLoader
@@ -16,7 +16,29 @@ from ./oauth2/mummy_support import oauth2AuthorizeHandler, oauth2TokenHandler
 import ./tapis_utils
 import ./tapis_security
 
-export swagger, typed_api, tapis_security, tapis_utils
+export swagger, tapis_runtime, typed_api, tapis_security, tapis_utils
+
+type
+  RequestIdentityConfig* = object
+    requestIdHeader*: string
+    traceparentHeader*: string
+    generateRequestId*: bool
+    echoRequestId*: bool
+    echoTraceparent*: bool
+    deriveRequestIdFromTraceparent*: bool
+
+  CorsConfig* = object
+    allowedOrigins*: seq[string]
+    allowedMethods*: seq[string]
+    allowedHeaders*: seq[string]
+    exposedHeaders*: seq[string]
+    allowCredentials*: bool
+    maxAgeSeconds*: int
+
+  RegisteredRoute = object
+    httpMethod*: string
+    path*: string
+    parts*: seq[string]
 
 type ApiRouter* = ref object
   ## Typed API router wrapper around a Mummy `Router`.
@@ -27,8 +49,11 @@ type ApiRouter* = ref object
   config*: ApiConfig ## Request/response codec and error-response configuration.
   title*: string ## OpenAPI document title.
   version*: string ## OpenAPI document version.
+  middlewares*: seq[ApiMiddleware]
   paths: JsonNode
   components: JsonNode
+  registeredRoutes: seq[RegisteredRoute]
+  corsPreflightInstalled: bool
 
 template tapi*(
   httpMethod: untyped,
@@ -53,8 +78,11 @@ proc initApiRouter*(
     config: config,
     title: title,
     version: version,
+    middlewares: @[],
     paths: newJObject(),
     components: newJObject(),
+    registeredRoutes: @[],
+    corsPreflightInstalled: false,
   )
 
 proc apiResponse*[T](
@@ -117,6 +145,359 @@ proc appendHeaderToken(headers: var HttpHeaders, key, token: string) =
         return
   headers[key] = token
 
+proc concatMiddlewares*(
+    first: openArray[ApiMiddleware], second: openArray[ApiMiddleware]
+): seq[ApiMiddleware] =
+  result = @[]
+  for middleware in first:
+    result.add(middleware)
+  for middleware in second:
+    result.add(middleware)
+
+proc useMiddleware*(api: ApiRouter, middleware: ApiMiddleware) =
+  api.middlewares.add(middleware)
+
+proc useMiddleware*(api: ApiRouter, middlewares: openArray[ApiMiddleware]) =
+  api.middlewares.add(middlewares)
+
+proc addRequestHandler*(
+  api: ApiRouter,
+  httpMethod, path: string,
+  handler: RequestHandler,
+  middlewares: seq[ApiMiddleware] = @[],
+)
+
+proc routeParts(path: string): seq[string] =
+  result = path.split('/')
+  if result.len > 0:
+    result.delete(0)
+
+proc registerRoute(api: ApiRouter, httpMethod, path: string) =
+  api.registeredRoutes.add(
+    RegisteredRoute(httpMethod: httpMethod, path: path, parts: routeParts(path))
+  )
+
+proc isPartialWildcard(test: string): bool {.inline.} =
+  test.len >= 2 and (test.startsWith('*') or test.endsWith('*'))
+
+proc partialWildcardMatches(partialWildcard, test: string): bool {.inline.} =
+  let
+    wildcardPrefix = partialWildcard[0] == '*'
+    wildcardSuffix = partialWildcard[^1] == '*'
+
+  var
+    literalLen = partialWildcard.len
+    literalStart = 0
+  if wildcardPrefix:
+    dec literalLen
+    inc literalStart
+  if wildcardSuffix:
+    dec literalLen
+
+  if literalLen > test.len:
+    return false
+
+  if wildcardPrefix and not wildcardSuffix:
+    return equalMem(
+      partialWildcard[1].unsafeAddr, test[test.len - literalLen].unsafeAddr, literalLen
+    )
+
+  if wildcardSuffix and not wildcardPrefix:
+    return equalMem(partialWildcard[0].unsafeAddr, test[0].unsafeAddr, literalLen)
+
+  partialWildcard[1 .. ^2] in test
+
+proc routeMatchesPath(route: RegisteredRoute, path: string): bool =
+  if path.len == 0 or path[0] != '/':
+    return false
+
+  let pathParts = routeParts(path)
+  if route.parts.len > pathParts.len:
+    return false
+
+  var
+    i = 0
+    matchedRoute = true
+    atLeastOneMultiWildcardMatch = false
+
+  for j, part in pathParts:
+    if i >= route.parts.len:
+      matchedRoute = false
+      break
+
+    if route.parts[i] == "*":
+      inc i
+    elif route.parts[i].len >= 2 and route.parts[i].startsWith('@'):
+      inc i
+    elif route.parts[i] == "**":
+      if i + 1 < route.parts.len and atLeastOneMultiWildcardMatch:
+        let matchesNextLiteral =
+          if route.parts[i + 1].isPartialWildcard():
+            partialWildcardMatches(route.parts[i + 1], part)
+          else:
+            part == route.parts[i + 1]
+        if matchesNextLiteral:
+          i += 2
+          atLeastOneMultiWildcardMatch = false
+        elif j == pathParts.high:
+          matchedRoute = false
+          break
+      else:
+        atLeastOneMultiWildcardMatch = true
+    elif route.parts[i].isPartialWildcard():
+      if not partialWildcardMatches(route.parts[i], part):
+        matchedRoute = false
+        break
+      inc i
+    else:
+      if part != route.parts[i]:
+        matchedRoute = false
+        break
+      inc i
+
+  matchedRoute
+
+proc routeMethodsForPath(api: ApiRouter, path: string): seq[string] =
+  for route in api.registeredRoutes:
+    if not route.routeMatchesPath(path):
+      continue
+    if route.httpMethod == "OPTIONS":
+      continue
+    if route.httpMethod notin result:
+      result.add(route.httpMethod)
+
+proc normalizeHttpTokens(values: openArray[string]): seq[string] =
+  for value in values:
+    let normalized = value.strip()
+    if normalized.len == 0:
+      continue
+    let token = normalized.toUpperAscii()
+    if token notin result:
+      result.add(token)
+
+proc corsConfig*(
+    allowedOrigins: openArray[string] = [],
+    allowedMethods: openArray[string] = [],
+    allowedHeaders: openArray[string] = [],
+    exposedHeaders: openArray[string] = [],
+    allowCredentials = false,
+    maxAgeSeconds = 0,
+): CorsConfig =
+  result.allowedOrigins = @allowedOrigins
+  result.allowedMethods = normalizeHttpTokens(allowedMethods)
+  result.allowedHeaders = @allowedHeaders
+  result.exposedHeaders = @exposedHeaders
+  result.allowCredentials = allowCredentials
+  result.maxAgeSeconds = maxAgeSeconds
+
+proc requestIdentityConfig*(
+    requestIdHeader = "X-Request-ID",
+    traceparentHeader = "traceparent",
+    generateRequestId = true,
+    echoRequestId = true,
+    echoTraceparent = true,
+    deriveRequestIdFromTraceparent = true,
+): RequestIdentityConfig =
+  result.requestIdHeader = requestIdHeader.strip()
+  result.traceparentHeader = traceparentHeader.strip()
+  result.generateRequestId = generateRequestId
+  result.echoRequestId = echoRequestId
+  result.echoTraceparent = echoTraceparent
+  result.deriveRequestIdFromTraceparent = deriveRequestIdFromTraceparent
+
+proc isLowerHex(value: string): bool =
+  for ch in value:
+    if ch notin {'0' .. '9', 'a' .. 'f'}:
+      return false
+  true
+
+proc isAllZeroHex(value: string): bool =
+  for ch in value:
+    if ch != '0':
+      return false
+  true
+
+proc parseTraceparentTraceId(headerValue: string): Option[string] =
+  let parts = headerValue.strip().split('-')
+  if parts.len != 4:
+    return none(string)
+  if parts[0].len != 2 or parts[1].len != 32 or parts[2].len != 16 or parts[3].len != 2:
+    return none(string)
+  if not parts[0].isLowerHex() or not parts[1].isLowerHex() or not parts[2].isLowerHex() or
+      not parts[3].isLowerHex():
+    return none(string)
+  if parts[1].isAllZeroHex() or parts[2].isAllZeroHex():
+    return none(string)
+  some(parts[1])
+
+proc generateRequestIdValue(): string =
+  var bytes = newSeq[byte](16)
+  if not urandom(bytes):
+    raise newException(OSError, "failed to generate request id")
+
+  const digits = "0123456789abcdef"
+  result = newStringOfCap(bytes.len * 2)
+  for value in bytes:
+    result.add(digits[int(value shr 4)])
+    result.add(digits[int(value and 0x0f)])
+
+proc requestIdentityMiddleware*(
+    config: RequestIdentityConfig = requestIdentityConfig()
+): ApiMiddleware =
+  result.name = "requestIdentity"
+  result.before = proc(context: RouteContext): ApiMiddlewareResult {.gcsafe.} =
+    let incomingTraceparent = context.request.headers[config.traceparentHeader].strip()
+    let incomingRequestId = context.request.headers[config.requestIdHeader].strip()
+    if incomingTraceparent.len > 0:
+      context.traceparent = incomingTraceparent
+    if incomingRequestId.len > 0:
+      context.requestId = incomingRequestId
+    elif config.deriveRequestIdFromTraceparent:
+      let traceId = parseTraceparentTraceId(incomingTraceparent)
+      if traceId.isSome():
+        context.requestId = traceId.get()
+    if context.requestId.len == 0 and config.generateRequestId:
+      context.requestId = generateRequestIdValue()
+
+    if config.echoRequestId and context.requestId.len > 0:
+      context.setResponseHeader(config.requestIdHeader, context.requestId)
+    if config.echoTraceparent and context.traceparent.len > 0:
+      context.setResponseHeader(config.traceparentHeader, context.traceparent)
+    amContinue
+
+proc useRequestIdentity*(
+    api: ApiRouter, config: RequestIdentityConfig = requestIdentityConfig()
+) =
+  api.useMiddleware(requestIdentityMiddleware(config))
+
+proc originAllowed(config: CorsConfig, origin: string): bool =
+  if origin.len == 0:
+    return false
+  if config.allowedOrigins.len == 0:
+    return false
+  if "*" in config.allowedOrigins:
+    return true
+  origin in config.allowedOrigins
+
+proc corsAllowOriginValue(config: CorsConfig, origin: string): string =
+  if "*" in config.allowedOrigins and not config.allowCredentials: "*" else: origin
+
+proc appendCorsVary(headers: var HttpHeaders) =
+  headers.appendHeaderToken("Vary", "Origin")
+  headers.appendHeaderToken("Vary", "Access-Control-Request-Method")
+  headers.appendHeaderToken("Vary", "Access-Control-Request-Headers")
+
+proc corsAllowedMethods(
+    config: CorsConfig, registeredMethods: openArray[string]
+): seq[string] =
+  let normalizedRegistered = normalizeHttpTokens(registeredMethods)
+  if config.allowedMethods.len == 0:
+    return normalizedRegistered
+  for httpMethod in normalizedRegistered:
+    if httpMethod in config.allowedMethods:
+      result.add(httpMethod)
+
+proc applyCorsResponseHeaders(
+    headers: var HttpHeaders,
+    config: CorsConfig,
+    origin: string,
+    methods: openArray[string] = [],
+    requestedHeaders = "",
+) =
+  headers["Access-Control-Allow-Origin"] = corsAllowOriginValue(config, origin)
+  if headers["Access-Control-Allow-Origin"] != "*":
+    headers.appendCorsVary()
+  if config.allowCredentials:
+    headers["Access-Control-Allow-Credentials"] = "true"
+  if config.exposedHeaders.len > 0:
+    headers["Access-Control-Expose-Headers"] = config.exposedHeaders.join(", ")
+  if methods.len > 0:
+    headers["Access-Control-Allow-Methods"] = normalizeHttpTokens(methods).join(", ")
+  if config.allowedHeaders.len > 0:
+    headers["Access-Control-Allow-Headers"] = config.allowedHeaders.join(", ")
+  elif requestedHeaders.len > 0:
+    headers["Access-Control-Allow-Headers"] = requestedHeaders
+  if config.maxAgeSeconds > 0:
+    headers["Access-Control-Max-Age"] = $config.maxAgeSeconds
+
+proc corsMiddleware*(api: ApiRouter, config: CorsConfig): ApiMiddleware =
+  result.name = "cors"
+  result.before = proc(context: RouteContext): ApiMiddlewareResult {.gcsafe.} =
+    let request = context.request
+    let origin = request.headers["Origin"].strip()
+    if origin.len == 0:
+      return amContinue
+    if not config.originAllowed(origin):
+      if request.httpMethod == "OPTIONS" and
+          request.headers["Access-Control-Request-Method"].strip().len > 0:
+        request.respond(403)
+        return amHandled
+      return amContinue
+
+    let allowedMethods =
+      corsAllowedMethods(config, api.routeMethodsForPath(request.path))
+    if request.httpMethod == "OPTIONS":
+      let requestedMethod =
+        request.headers["Access-Control-Request-Method"].strip().toUpperAscii()
+      if requestedMethod.len == 0:
+        return amContinue
+      if allowedMethods.len == 0:
+        return amContinue
+      if requestedMethod notin allowedMethods:
+        var headers: HttpHeaders
+        headers["Allow"] = allowedMethods.join(", ")
+        headers.applyCorsResponseHeaders(
+          config,
+          origin,
+          allowedMethods,
+          request.headers["Access-Control-Request-Headers"],
+        )
+        request.respond(405, headers)
+        return amHandled
+
+      var headers: HttpHeaders
+      headers.applyCorsResponseHeaders(
+        config,
+        origin,
+        allowedMethods,
+        request.headers["Access-Control-Request-Headers"],
+      )
+      request.respond(204, headers)
+      return amHandled
+
+    context.setResponseHeader(
+      "Access-Control-Allow-Origin", corsAllowOriginValue(config, origin)
+    )
+    if corsAllowOriginValue(config, origin) != "*":
+      context.appendResponseHeaderToken("Vary", "Origin")
+    if config.allowCredentials:
+      context.setResponseHeader("Access-Control-Allow-Credentials", "true")
+    if config.exposedHeaders.len > 0:
+      context.setResponseHeader(
+        "Access-Control-Expose-Headers", config.exposedHeaders.join(", ")
+      )
+    amContinue
+
+proc useCors*(api: ApiRouter, config: CorsConfig) =
+  api.useMiddleware(api.corsMiddleware(config))
+  if api.corsPreflightInstalled:
+    return
+
+  api.corsPreflightInstalled = true
+  api.addRequestHandler(
+    "OPTIONS",
+    "/**",
+    proc(request: Request) {.gcsafe.} =
+      let allowedMethods = api.routeMethodsForPath(request.path)
+      if allowedMethods.len == 0:
+        request.respond(404)
+        return
+
+      var headers: HttpHeaders
+      headers["Allow"] = allowedMethods.join(", ")
+      request.respond(204, headers),
+  )
+
 type ContentEncoding = enum
   contentEncodingGzip
   contentEncodingDeflate
@@ -176,6 +557,9 @@ proc respondEncoded(
 ) =
   var responseHeaders = headers
   responseHeaders["Content-Type"] = formatContentType(format)
+  responseHeaders.applyMiddlewareResponseHeaders()
+  if currentRouteContext().isSome():
+    currentRouteContext().get().responseStatus = statusCode
   compressResponse(request, statusCode, responseHeaders, body)
   trace "tapis response encoded",
     httpMethod = request.httpMethod,
@@ -184,7 +568,9 @@ proc respondEncoded(
     statusCode = statusCode,
     contentType = responseHeaders["Content-Type"],
     contentEncoding = responseHeaders["Content-Encoding"],
-    bodyLength = body.len
+    bodyLength = body.len,
+    requestId = currentRequestId(),
+    traceparent = currentTraceparent()
   if request.httpMethod == "HEAD":
     responseHeaders["Content-Length"] = $body.len
     request.respond(statusCode, responseHeaders)
@@ -219,13 +605,35 @@ proc traceTapisRawResponse(
     uri = request.uri,
     statusCode = statusCode,
     contentType = contentType,
-    bodyLength = bodyLength
+    bodyLength = bodyLength,
+    requestId = currentRequestId(),
+    traceparent = currentTraceparent()
+
+proc traceMiddlewareAfterHookRaised(
+    request: Request,
+    routeMethod, routePath, middlewareName, requestId, traceparent, exceptionName,
+      exceptionMessage: string,
+) {.gcsafe.} =
+  trace "tapis middleware after hook raised",
+    httpMethod = request.httpMethod,
+    path = request.path,
+    uri = request.uri,
+    routeMethod = routeMethod,
+    routePath = routePath,
+    middleware = middlewareName,
+    requestId = requestId,
+    traceparent = traceparent,
+    exception = exceptionName,
+    message = exceptionMessage
 
 proc respondRaw[contentType: static string](
     request: Request, value: RawResponse[contentType]
 ) =
   var headers = value.headers.toHttpHeaders()
   headers["Content-Type"] = contentType
+  headers.applyMiddlewareResponseHeaders()
+  if currentRouteContext().isSome():
+    currentRouteContext().get().responseStatus = value.statusCode
   var body = value.body
   compressResponse(request, value.statusCode, headers, body)
   traceTapisRawResponse(request, value.statusCode, contentType, body.len)
@@ -420,40 +828,93 @@ proc addEndpointWithParamsAndBody*[Body, Out](
   addEndpointWithParamsAndBody(api, httpMethod, path, meta, parameters, Body, Out)
 
 proc addRequestHandler*(
-    api: ApiRouter, httpMethod, path: string, handler: RequestHandler
+    api: ApiRouter,
+    httpMethod, path: string,
+    handler: RequestHandler,
+    middlewares: seq[ApiMiddleware] = @[],
 ) =
   ## Registers a raw Mummy request handler on the wrapped router.
+  api.registerRoute(httpMethod, path)
+  let routeMiddlewares = concatMiddlewares(api.middlewares, middlewares)
   let tracedHandler: RequestHandler = proc(request: Request) {.gcsafe.} =
-    trace "tapis request received",
-      httpMethod = request.httpMethod,
-      path = request.path,
-      uri = request.uri,
-      routeMethod = httpMethod,
-      routePath = path,
-      pathParamCount = request.pathParams.len,
-      queryParamCount = request.queryParams.len,
-      bodyLength = request.body.len,
-      contentType = request.headers["Content-Type"],
-      accept = request.headers["Accept"]
+    let previousContext = currentRouteContext()
+    var context = RouteContext(
+      request: request,
+      config: api.config,
+      routeMethod: httpMethod,
+      routePath: path,
+      startedAt: getMonoTime(),
+      responseHeaders: emptyHttpHeaders(),
+      responseStatus: 0,
+    )
+    setCurrentRouteContext(context)
+    var executedMiddlewares = 0
     try:
+      for middleware in routeMiddlewares:
+        inc executedMiddlewares
+        if middleware.before != nil and middleware.before(context) == amHandled:
+          trace "tapis request handled in middleware",
+            httpMethod = request.httpMethod,
+            path = request.path,
+            uri = request.uri,
+            routeMethod = httpMethod,
+            routePath = path,
+            middleware = middleware.name,
+            requestId = context.requestId,
+            traceparent = context.traceparent
+          return
+      trace "tapis request received",
+        httpMethod = request.httpMethod,
+        path = request.path,
+        uri = request.uri,
+        routeMethod = httpMethod,
+        routePath = path,
+        pathParamCount = request.pathParams.len,
+        queryParamCount = request.queryParams.len,
+        bodyLength = request.body.len,
+        contentType = request.headers["Content-Type"],
+        accept = request.headers["Accept"],
+        requestId = context.requestId,
+        traceparent = context.traceparent
       handler(request)
       trace "tapis request handler returned",
         httpMethod = request.httpMethod,
         path = request.path,
         uri = request.uri,
         routeMethod = httpMethod,
-        routePath = path
+        routePath = path,
+        requestId = context.requestId,
+        traceparent = context.traceparent
     except CatchableError as e:
-      discard e
+      context.failure = e
       trace "tapis request handler raised",
         httpMethod = request.httpMethod,
         path = request.path,
         uri = request.uri,
         routeMethod = httpMethod,
         routePath = path,
+        requestId = context.requestId,
+        traceparent = context.traceparent,
         exception = e.name,
         message = e.msg
       raise
+    finally:
+      if executedMiddlewares > 0:
+        for index in countdown(executedMiddlewares - 1, 0):
+          let middleware = routeMiddlewares[index]
+          if middleware.after == nil:
+            continue
+          try:
+            middleware.after(context)
+          except CatchableError as e:
+            traceMiddlewareAfterHookRaised(
+              request, httpMethod, path, middleware.name, context.requestId,
+              context.traceparent, $e.name, e.msg,
+            )
+      if previousContext.isSome():
+        setCurrentRouteContext(previousContext.get())
+      else:
+        clearCurrentRouteContext()
   api.router.addRoute(httpMethod, path, tracedHandler)
 
 proc registerOAuth2*(api: ApiRouter, config: OAuth2Config, tokenPath = "/oauth/token") =
@@ -507,7 +968,9 @@ proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =
       statusCode = statusCode,
       errorCode = apiErrorCode(e),
       exception = e.name,
-      message = e.msg
+      message = e.msg,
+      requestId = currentRequestId(),
+      traceparent = currentTraceparent()
   else:
     warn "tapis request rejected",
       httpMethod = request.httpMethod,
@@ -516,7 +979,9 @@ proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =
       statusCode = statusCode,
       errorCode = apiErrorCode(e),
       exception = e.name,
-      message = e.msg
+      message = e.msg,
+      requestId = currentRequestId(),
+      traceparent = currentTraceparent()
   let format =
     try:
       responseFormat(request, config)
@@ -613,68 +1078,72 @@ proc route*[Out](
     httpMethod, path: string,
     handler: proc(): Out {.gcsafe.},
     source: ApiDecodeSource = adsNone,
+    middlewares: seq[ApiMiddleware] = @[],
     meta: EndpointMeta = endpointMeta(),
 ) =
   ## Registers a typed route with no decoded input.
   api.addEndpoint(httpMethod, path, source, meta, EmptyInput, Out)
-  api.addRequestHandler(
-    httpMethod,
-    path,
-    secureRequestHandler(
-      toApiHandler(handler, api.config, meta.responseStatus), meta.security
-    ),
+  let securedHandler = secureRequestHandler(
+    toApiHandler(handler, api.config, meta.responseStatus), meta.security
   )
+  if middlewares.len == 0:
+    api.addRequestHandler(httpMethod, path, securedHandler)
+  else:
+    api.addRequestHandler(httpMethod, path, securedHandler, middlewares)
 
 proc route*[Out](
     api: ApiRouter,
     httpMethod, path: string,
     handler: proc(request: Request): Out {.gcsafe.},
     source: ApiDecodeSource = adsNone,
+    middlewares: seq[ApiMiddleware] = @[],
     meta: EndpointMeta = endpointMeta(),
 ) =
   ## Registers a request-aware typed route with no decoded input.
   api.addEndpoint(httpMethod, path, source, meta, EmptyInput, Out)
-  api.addRequestHandler(
-    httpMethod,
-    path,
-    secureRequestHandler(
-      toApiHandler(handler, api.config, meta.responseStatus), meta.security
-    ),
+  let securedHandler = secureRequestHandler(
+    toApiHandler(handler, api.config, meta.responseStatus), meta.security
   )
+  if middlewares.len == 0:
+    api.addRequestHandler(httpMethod, path, securedHandler)
+  else:
+    api.addRequestHandler(httpMethod, path, securedHandler, middlewares)
 
 proc route*[In, Out](
     api: ApiRouter,
     httpMethod, path: string,
     handler: proc(input: In): Out {.gcsafe.},
     source: ApiDecodeSource,
+    middlewares: seq[ApiMiddleware] = @[],
     meta: EndpointMeta = endpointMeta(),
 ) =
   ## Registers a typed route with decoded parameters or body input.
   api.addEndpoint(httpMethod, path, source, meta, In, Out)
-  api.addRequestHandler(
-    httpMethod,
-    path,
-    secureRequestHandler(
-      toApiHandler(handler, api.config, source, meta.responseStatus), meta.security
-    ),
+  let securedHandler = secureRequestHandler(
+    toApiHandler(handler, api.config, source, meta.responseStatus), meta.security
   )
+  if middlewares.len == 0:
+    api.addRequestHandler(httpMethod, path, securedHandler)
+  else:
+    api.addRequestHandler(httpMethod, path, securedHandler, middlewares)
 
 proc route*[In, Out](
     api: ApiRouter,
     httpMethod, path: string,
     handler: proc(request: Request, input: In): Out {.gcsafe.},
     source: ApiDecodeSource,
+    middlewares: seq[ApiMiddleware] = @[],
     meta: EndpointMeta = endpointMeta(),
 ) =
   ## Registers a request-aware typed route with decoded input.
   api.addEndpoint(httpMethod, path, source, meta, In, Out)
-  api.addRequestHandler(
-    httpMethod,
-    path,
-    secureRequestHandler(
-      toApiHandler(handler, api.config, source, meta.responseStatus), meta.security
-    ),
+  let securedHandler = secureRequestHandler(
+    toApiHandler(handler, api.config, source, meta.responseStatus), meta.security
   )
+  if middlewares.len == 0:
+    api.addRequestHandler(httpMethod, path, securedHandler)
+  else:
+    api.addRequestHandler(httpMethod, path, securedHandler, middlewares)
 
 type HandlerParam = object
   name: string
@@ -783,12 +1252,19 @@ proc canUseDirectRoute(params: seq[HandlerParam], source: NimNode): bool =
 proc flatParamStart(params: seq[HandlerParam]): int =
   if params.len > 0 and params[0].typeNode.isRequestType(): 1 else: 0
 
+proc middlewareSeqExpr(middlewares: NimNode): NimNode =
+  if middlewares.kind == nnkBracket:
+    newTree(nnkPrefix, ident"@", middlewares.copyNimTree())
+  else:
+    middlewares.copyNimTree()
+
 proc buildRouteHandler(
     api: NimNode,
     httpMethod: NimNode,
     path: NimNode,
     handler: NimNode,
     source: NimNode,
+    middlewares: NimNode,
     meta: NimNode,
 ): NimNode =
   let signature = handler.handlerSignature()
@@ -799,7 +1275,14 @@ proc buildRouteHandler(
     else:
       handler.copyNimTree()
   if signature.params.canUseDirectRoute(source):
-    return newCall(bindSym"route", api, httpMethod, path, handlerTarget, source, meta)
+    let middlewareExpr =
+      if middlewares.kind == nnkBracket and middlewares.len == 0:
+        newTree(nnkPrefix, ident"@", newTree(nnkBracket))
+      else:
+        middlewareSeqExpr(middlewares)
+    return newCall(
+      bindSym"route", api, httpMethod, path, handlerTarget, source, middlewareExpr, meta
+    )
 
   let start = signature.params.flatParamStart()
   if start >= signature.params.len:
@@ -890,6 +1373,25 @@ proc buildRouteHandler(
       parametersName,
       bodyType.copyNimTree(),
     )
+    let middlewareExpr = middlewareSeqExpr(middlewares)
+    let addHandlerCall =
+      if middlewares.kind == nnkBracket and middlewares.len == 0:
+        quote:
+          addRequestHandler(
+            `api`,
+            `httpMethod`,
+            `path`,
+            secureRequestHandler(`wrapperName`, `routeMeta`.security),
+          )
+      else:
+        quote:
+          addRequestHandler(
+            `api`,
+            `httpMethod`,
+            `path`,
+            secureRequestHandler(`wrapperName`, `routeMeta`.security),
+            `middlewareExpr`,
+          )
     return quote:
       block:
         let `routeMeta` = `meta`
@@ -907,12 +1409,7 @@ proc buildRouteHandler(
           except CatchableError as e:
             `requestName`.respondApiError(e, `routeConfig`)
 
-        addRequestHandler(
-          `api`,
-          `httpMethod`,
-          `path`,
-          secureRequestHandler(`wrapperName`, `routeMeta`.security),
-        )
+        `addHandlerCall`
 
   if sourceKind != "adsparams":
     error("flat TAPIS handlers currently decode path/query parameters only", handler)
@@ -966,6 +1463,25 @@ proc buildRouteHandler(
     routeMeta,
     parametersName,
   )
+  let middlewareExpr = middlewareSeqExpr(middlewares)
+  let addHandlerCall =
+    if middlewares.kind == nnkBracket and middlewares.len == 0:
+      quote:
+        addRequestHandler(
+          `api`,
+          `httpMethod`,
+          `path`,
+          secureRequestHandler(`wrapperName`, `routeMeta`.security),
+        )
+    else:
+      quote:
+        addRequestHandler(
+          `api`,
+          `httpMethod`,
+          `path`,
+          secureRequestHandler(`wrapperName`, `routeMeta`.security),
+          `middlewareExpr`,
+        )
   result = quote:
     block:
       let `routeMeta` = `meta`
@@ -983,12 +1499,7 @@ proc buildRouteHandler(
         except CatchableError as e:
           `requestName`.respondApiError(e, `routeConfig`)
 
-      addRequestHandler(
-        `api`,
-        `httpMethod`,
-        `path`,
-        secureRequestHandler(`wrapperName`, `routeMeta`.security),
-      )
+      `addHandlerCall`
 
 macro routeHandler*(
     api: typed,
@@ -996,12 +1507,13 @@ macro routeHandler*(
     path: typed,
     handler: typed,
     source: typed,
+    middlewares: typed,
     meta: typed,
 ): untyped =
   ## Registers a typed route by analyzing the handler signature at compile time.
   ##
   ## Most applications use `api.get`, `api.post`, or `api.add` instead.
-  buildRouteHandler(api, httpMethod, path, handler, source, meta)
+  buildRouteHandler(api, httpMethod, path, handler, source, middlewares, meta)
 
 template defineApiMethod(name, httpMethod, source: untyped) =
   template name*(
@@ -1015,6 +1527,7 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       responseStatus: int = 200,
       request: ApiRequestDoc = apiRequestDoc(),
       responses: openArray[(int, ApiResponseDoc)] = [],
+      middlewares: openArray[ApiMiddleware] = [],
       security: ApiSecurity = noSecurity(),
   ): untyped =
     ## Registers a typed TAPIS route for this HTTP method.
@@ -1024,6 +1537,7 @@ template defineApiMethod(name, httpMethod, source: untyped) =
       path,
       handler,
       source,
+      middlewares,
       endpointMeta(
         summary, description, operationId, tags, responseStatus, request, responses,
         security,
@@ -1113,12 +1627,77 @@ proc isDefaultRequestArg(node: NimNode): bool =
 proc isDefaultResponsesArg(node: NimNode): bool =
   node.kind == nnkBracket and node.len == 0
 
+const scopedMiddlewareRouteNames =
+  ["add", "get", "head", "post", "put", "delete", "options", "patch"]
+
+proc isMiddlewaresArg(node: NimNode): bool =
+  node.kind in {nnkExprEqExpr, nnkExprColonExpr} and node.len == 2 and
+    node[0].callName() == "middlewares"
+
+proc middlewaresArgIndex(call: NimNode): int =
+  for index in 1 ..< call.len:
+    if call[index].isMiddlewaresArg():
+      return index
+  -1
+
+proc isScopedMiddlewareRouteCall(node, api: NimNode): bool =
+  if node.kind notin {nnkCall, nnkCommand} or node.len == 0:
+    return false
+
+  let callee = node[0]
+  if callee.kind != nnkDotExpr or callee.len != 2:
+    return false
+
+  callee[0].repr == api.repr and callee[1].callName() in scopedMiddlewareRouteNames
+
+proc isWithMiddlewareCall(node: NimNode): bool =
+  if node.kind notin {nnkCall, nnkCommand} or node.len == 0:
+    return false
+  node[0].callName() == "withMiddleware"
+
+proc rewriteWithMiddleware(node, api, middleware: NimNode): NimNode =
+  case node.kind
+  of nnkStmtList:
+    result = newStmtList()
+    for child in node:
+      result.add rewriteWithMiddleware(child, api, middleware)
+  of nnkCall, nnkCommand:
+    result = node.copyNimTree()
+    if node.isScopedMiddlewareRouteCall(api):
+      let index = result.middlewaresArgIndex()
+      if index < 0:
+        result.add newTree(
+          nnkExprEqExpr,
+          ident"middlewares",
+          newTree(nnkBracket, middleware.copyNimTree()),
+        )
+      else:
+        let existing = result[index][1]
+        result[index][1] = newCall(
+          bindSym"concatMiddlewares",
+          newTree(nnkBracket, middleware.copyNimTree()),
+          existing.copyNimTree(),
+        )
+    elif node.isWithMiddlewareCall():
+      discard
+    else:
+      for index in 1 ..< result.len:
+        result[index] = rewriteWithMiddleware(result[index], api, middleware)
+  else:
+    result = node.copyNimTree()
+    for index in 0 ..< result.len:
+      result[index] = rewriteWithMiddleware(result[index], api, middleware)
+
+macro withMiddleware*(api: typed, middleware: typed, body: untyped): untyped =
+  rewriteWithMiddleware(body, api, middleware)
+
 macro add*(
     api: typed,
     handler: typed,
     security: typed = noSecurity(),
     request: typed = apiRequestDoc(),
     responses: typed = [],
+    middlewares: typed = [],
 ): untyped =
   ## Registers a proc annotated with the `tapi` pragma.
   ##
@@ -1174,6 +1753,7 @@ macro add*(
     responseStatus,
     newTree(nnkExprEqExpr, ident"request", requestArg),
     newTree(nnkExprEqExpr, ident"responses", responsesArg),
+    newTree(nnkExprEqExpr, ident"middlewares", middlewares.copyNimTree()),
     newTree(nnkExprEqExpr, ident"security", security),
   )
 
@@ -1188,6 +1768,7 @@ template options*(
     responseStatus = 200,
     request: ApiRequestDoc = apiRequestDoc(),
     responses: openArray[(int, ApiResponseDoc)] = [],
+    middlewares: openArray[ApiMiddleware] = [],
     security: ApiSecurity = noSecurity(),
 ): untyped =
   ## Registers an `OPTIONS` TAPIS route.
@@ -1197,6 +1778,7 @@ template options*(
     path,
     handler,
     adsNone,
+    middlewares,
     endpointMeta(
       summary, description, operationId, tags, responseStatus, request, responses,
       security,
@@ -1212,8 +1794,11 @@ proc openApiHandler*(api: ApiRouter): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
     var headers: HttpHeaders
     headers["Content-Type"] = jsonContentType
+    headers.applyMiddlewareResponseHeaders()
     let body = $api.openApiJson()
     var responseBody = body
+    if currentRouteContext().isSome():
+      currentRouteContext().get().responseStatus = 200
     compressResponse(request, 200, headers, responseBody)
     trace "tapis openapi response",
       httpMethod = request.httpMethod,
