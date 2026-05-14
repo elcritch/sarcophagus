@@ -1,8 +1,9 @@
 import mummy
 
+import ./core/tapis_runtime
 import ./core/typed_api
 
-export typed_api
+export typed_api, tapis_runtime
 
 proc mummyToApiHeaders*(headers: HttpHeaders): ApiHeaders =
   ## Converts Mummy response headers to typed API headers.
@@ -18,6 +19,7 @@ proc respondTypedApiValue*[T](request: Request, value: ApiResponse[T]) =
   ## Writes a typed API response to a Mummy request as JSON.
   var responseHeaders = value.headers.apiToMummyHeaders()
   responseHeaders["Content-Type"] = jsonContentType
+  responseHeaders.applyMiddlewareResponseHeaders()
   let body = encodeApi(value.body, apiJson)
 
   if request.httpMethod == "HEAD":

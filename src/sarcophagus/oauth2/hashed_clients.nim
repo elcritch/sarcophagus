@@ -5,6 +5,7 @@ import mummy/routers
 import chroniclers
 
 import ../security/secret_hashing
+import ../core/tapis_runtime
 import ../tapis_utils
 import ./common
 import ./core
@@ -19,6 +20,7 @@ proc respondJson(
 ) =
   var responseHeaders = headers
   responseHeaders["Content-Type"] = "application/json; charset=utf-8"
+  responseHeaders.applyMiddlewareResponseHeaders()
 
   if request.httpMethod == "HEAD":
     responseHeaders["Content-Length"] = $body.len

@@ -47,6 +47,15 @@ type
 proc serveServer(args: ServerThreadArgs) {.thread.} =
   args.server.serve(args.port, address = args.address)
 
+randomize()
+var nextTestPort = 20000 + rand(20000)
+
+proc allocateTestPort(): Port =
+  result = Port(nextTestPort)
+  inc nextTestPort
+  if nextTestPort > 60000:
+    nextTestPort = 20000
+
 proc getItem(params: Params[GetItemParams]): ItemOut {.gcsafe.} =
   let verbose =
     if params.verbose.isSome():
@@ -306,12 +315,10 @@ proc portFromBaseUrl(baseUrl: string): Port =
   Port(parseInt(baseUrl.rsplit(":", 1)[1]))
 
 proc withTestServer(body: proc(baseUrl: string) {.gcsafe.}) =
-  randomize()
   let api = buildApi(includeStackTraces = true)
   let server = newServer(api.router, workerThreads = 1)
-  let portNumber = 20000 + rand(20000)
-  let args =
-    ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+  let port = allocateTestPort()
+  let args = ServerThreadArgs(server: server, port: port, address: "127.0.0.1")
 
   var serverThread: Thread[ServerThreadArgs]
   createThread(serverThread, serveServer, args)
@@ -320,7 +327,7 @@ proc withTestServer(body: proc(baseUrl: string) {.gcsafe.}) =
     joinThread(serverThread)
 
   server.waitUntilReady()
-  body("http://127.0.0.1:" & $portNumber)
+  body("http://127.0.0.1:" & $port)
 
 suite "typed mummy tapis":
   test "parses path and query params into typed objects":
@@ -457,14 +464,12 @@ suite "typed mummy tapis":
       check responseBody(raw) == ""
 
   test "converts typed handlers to plain mummy handlers":
-    randomize()
     var router: Router
     router.get("/converted/@id", toMummyHandler(getItem, adsParams))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let port = allocateTestPort()
+    let args = ServerThreadArgs(server: server, port: port, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -479,7 +484,7 @@ suite "typed mummy tapis":
       client.close()
 
     let response =
-      client.get("http://127.0.0.1:" & $portNumber & "/converted/21?verbose=true")
+      client.get("http://127.0.0.1:" & $port & "/converted/21?verbose=true")
     check response.code.int == 200
     let body = parseJson(response.body)
     check body["id"].getInt() == 21
