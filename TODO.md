@@ -23,6 +23,8 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
   `Last-Modified`, range requests, and compression interaction.
 - [x] Cookie and session helpers for typed cookie parsing, signed cookies,
   secure defaults, SameSite, and expiry handling.
+- [x] Browser login helpers for password-login cookies, logout cookie clearing,
+  and current-user/session middleware.
 - [ ] Multipart and form-data support for typed forms and file uploads.
 - [ ] Optional RFC 9457 Problem Details error responses while preserving the
   current structured error format.

@@ -272,12 +272,12 @@ The most common browser flow is:
 3. load the current user from that cookie on later requests
 4. clear the cookie on logout
 
-Example using `password_login` plus cookie transport:
+Example using `password_login` plus the browser-login helpers:
 
 ```nim
-import std/[json, options]
-import mummy
-import sarcophagus/[cookies, security/password_login, tapis]
+import std/options
+import sarcophagus/tapis
+import sarcophagus/security/[browser_login, password_login]
 
 type
   LoginBody = object
@@ -287,44 +287,55 @@ type
   LoginResponse = object
     ok*: bool
 
-let loginCookie = cookieOptions(
-  path = "/",
-  secure = true,
-  httpOnly = true,
-  sameSite = cookieSameSiteLax,
-  maxAgeSeconds = some(3600),
-)
+  MeResponse = object
+    subject*: string
+    displayName*: string
 
-proc login(body: LoginBody, request: Request): ApiResponse[LoginResponse] {.tapi(post, "/login").} =
-  let result = authenticatePasswordLogin(
+let cookieConfig = initBrowserLoginCookieConfig("app_session")
+
+proc loadUser(session: PasswordLoginSession): Option[PasswordLoginUser] {.gcsafe.} =
+  loadUserBySubject(session.subject)
+
+proc login(body: LoginBody): ApiResponse[LoginResponse] =
+  let login = authenticateBrowserLogin(
     loginConfig,
+    cookieConfig,
     verifier,
     username = body.username,
     password = body.password,
   )
-  if not result.ok:
-    raiseApiError(result.failure.statusCode, result.failure.message, result.failure.code)
+  browserLoginResponse(login, LoginResponse(ok: true))
 
-  apiResponse(
-    LoginResponse(ok: true),
-    headers = @[setCookieHeader("app_session", result.sessionToken, loginCookie)],
-  )
+proc me(): MeResponse =
+  let user = requireBrowserLoginUser()
+  MeResponse(subject: user.subject, displayName: user.displayName)
 
-proc me(request: Request): ApiResponse[JsonNode] {.tapi(get, "/me").} =
-  let token = request.requestCookieValue("app_session")
-  let session = validatePasswordLoginSession(loginConfig, token)
-  if not session.ok:
-    raiseApiError(401, "Not logged in", "not_logged_in")
+proc logout(): ApiResponse[LoginResponse] =
+  browserLogoutResponse(cookieConfig, LoginResponse(ok: true))
 
-  apiResponse(%*{"subject": session.session.subject})
-
-proc logout(): ApiResponse[LoginResponse] {.tapi(post, "/logout").} =
-  apiResponse(LoginResponse(ok: true), headers = @[clearCookieHeader("app_session")])
+let api = initApiRouter("Browser App", "1.0.0")
+api.post("/login", login)
+api.get(
+  "/me",
+  me,
+  middlewares = [
+    browserLoginMiddleware(
+      loginConfig,
+      cookieConfig,
+      required = true,
+      loadUser = loadUser,
+    )
+  ],
+)
+api.post("/logout", logout)
 ```
 
 This pattern keeps the browser cookie as a transport for a signed login token.
 The token is already integrity-protected by `password_login`; the cookie
-attributes make browser handling safer.
+attributes make browser handling safer. The middleware validates the session
+cookie before the handler runs and exposes the current session through
+`currentBrowserLoginSession()`, `requireBrowserLoginSession()`,
+`currentBrowserLoginUser()`, and `requireBrowserLoginUser()`.
 
 ## Signed Cookies
 
@@ -428,36 +439,26 @@ You can transport that token in an `HttpOnly` cookie.
 That looks like:
 
 ```nim
-import sarcophagus/[cookies, security/password_login]
+import sarcophagus/security/[browser_login, password_login]
 
-let login = authenticatePasswordLogin(
+let cookieConfig = initBrowserLoginCookieConfig("app_session")
+
+let login = authenticateBrowserLogin(
   loginConfig,
+  cookieConfig,
   verifier,
   username = body.username,
   password = body.password,
 )
 
-if login.ok:
-  let cookie = setCookieHeader(
-    "app_session",
-    login.sessionToken,
-    cookieOptions(
-      path = "/",
-      secure = true,
-      httpOnly = true,
-      sameSite = cookieSameSiteLax,
-      maxAgeSeconds = some(loginConfig.sessionTtlSeconds),
-    ),
-  )
+let response = browserLoginResponse(login, LoginResponse(ok: true))
 ```
 
 Later:
 
 ```nim
-let sessionToken = request.requestCookieValue("app_session")
-let session = validatePasswordLoginSession(loginConfig, sessionToken)
-if session.ok:
-  echo session.session.subject
+let session = requireBrowserLoginSession()
+echo session.subject
 ```
 
 This works because the `password_login` token is already signed. In that case,
@@ -469,6 +470,7 @@ These are related but not the same:
 
 - `sessionCookieHeader(...)` signs a cookie value directly
 - `authenticatePasswordLogin(...)` mints a signed login token you can carry in a cookie
+- `authenticateBrowserLogin(...)` wraps that login result and attaches the cookie header
 
 Do not stack both unless you have a specific reason. Most applications should
 pick one:
@@ -501,11 +503,11 @@ them later.
 
 Safe usage pattern:
 
-1. Verify credentials with `authenticatePasswordLogin`.
-2. Put the returned `sessionToken` in an `HttpOnly` cookie.
-3. Read the cookie on later page requests.
-4. Call `validatePasswordLoginSession`.
-5. Clear the cookie on logout.
+1. Verify credentials with `authenticateBrowserLogin`.
+2. Return `browserLoginResponse` to set the `HttpOnly` cookie.
+3. Add `browserLoginMiddleware` to browser-authenticated routes.
+4. Load the current session with `requireBrowserLoginSession`.
+5. Return `browserLogoutResponse` to clear the cookie on logout.
 
 Use the default PBKDF2-based secret hashing for human passwords.
 
@@ -660,6 +662,7 @@ Avoid reusing one secret string for JWTs, cookies, and client-secret hashing.
 - `sarcophagus/tapis_security`
 - `sarcophagus/oauth2`
 - `sarcophagus/oauth2/hashed_clients`
+- `sarcophagus/security/browser_login`
 - `sarcophagus/security/password_login`
 - `sarcophagus/security/secret_hashing`
 - `sarcophagus/cookies`
