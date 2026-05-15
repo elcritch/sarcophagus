@@ -9,6 +9,10 @@ The Nim types can be encoded/decorded using JSON, CBOR, or MSGPACK. The typed ap
 
 Sarcophagus also provides security helpers to make OAuth2-protected API endpoints. This uses JWT tokens. These can be used directly with Mummy in addition to Sarcophagus typed APIs.
 
+Security guide: [docs/security.md](docs/security.md) covers secure OAuth2,
+signed cookies, browser login flows, CORS/CSRF concerns, request IDs, and
+secret-handling guidance.
+
 ## Installation
 
 ```sh
@@ -259,6 +263,9 @@ Error handling is automatic for TAPIS routes:
 
 ## `sarcophagus/tapis_security`
 
+For a broader discussion of OAuth2, cookies, signed sessions, and browser login
+patterns, see [docs/security.md](docs/security.md).
+
 `sarcophagus/tapis_security` adds OpenAPI-aware route security to TAPIS. It is
 exported by `sarcophagus/tapis`, so most applications only need to import
 `sarcophagus/tapis`.
@@ -348,6 +355,9 @@ tokens and the OpenAPI generator emits `components.securitySchemes` plus per-rou
 `security` requirements.
 
 ## `sarcophagus/oauth2`
+
+For end-to-end operational guidance, including browser login and authorization
+code flow setup, see [docs/security.md](docs/security.md).
 
 `sarcophagus/oauth2` is the main facade. The implementation is split into:
 
