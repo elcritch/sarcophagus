@@ -1,5 +1,6 @@
 import std/[options, strutils]
 
+import ../cookies
 import ../core/typed_api
 import ./core
 
@@ -43,13 +44,6 @@ proc valueFor(values: ApiHeaders, name: string, caseInsensitive = false): string
 proc headerValue*(headers: ApiHeaders, name: string): string =
   ## Returns one header value from typed API headers.
   headers.valueFor(name, caseInsensitive = true)
-
-proc cookieValue*(headers: ApiHeaders, name: string): string =
-  ## Returns one Cookie header value from typed API headers.
-  for part in headers.headerValue("Cookie").split(';'):
-    let pieces = part.strip().split('=', maxsplit = 1)
-    if pieces.len == 2 and pieces[0] == name:
-      return pieces[1]
 
 proc to*(
     response: OAuth2TokenResponse, tp: typedesc[OAuth2TokenPayload]

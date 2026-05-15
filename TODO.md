@@ -21,7 +21,7 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
 
 - [ ] Static file and asset response helpers with content type detection, ETag,
   `Last-Modified`, range requests, and compression interaction.
-- [ ] Cookie and session helpers for typed cookie parsing, signed cookies,
+- [x] Cookie and session helpers for typed cookie parsing, signed cookies,
   secure defaults, SameSite, and expiry handling.
 - [ ] Multipart and form-data support for typed forms and file uploads.
 - [ ] Optional RFC 9457 Problem Details error responses while preserving the
