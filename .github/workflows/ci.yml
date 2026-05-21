@@ -23,8 +23,8 @@ jobs:
             ${{ runner.os }}-atlas-${{ hashFiles('sarcophagus.nimble') }}
       - run: echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
       - run: mkdir /tmp/atlas
-      - run:  curl -fsSL https://raw.githubusercontent.com/nim-lang/atlas/HEAD/install.sh |  ATLAS_REF='experiment/packager' ATLAS_TMP_ROOT=/tmp/atlas bash -
-      - run: atlas -v
-      - run: cp /tmp/atlas/atlas-install.*/source/bin/atlas-pkg ~/.nimble/bin/
-      - run: atlas-pkg --feature:cbor --feature:jsony --feature:msgpack --feature:dev
+      - run: git clone https://github.com/nim-lang/atlas
+      - run: cd atlas && nim buildRelease
+      - run: ./atlas/bin/atlas-pkg -v
+      - run: ./atlas/bin/atlas-pkg --feature:cbor --feature:jsony --feature:msgpack --feature:dev
       - run: nim test
