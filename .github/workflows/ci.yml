@@ -24,6 +24,5 @@ jobs:
       - run: echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
       - run: curl -fsSL https://raw.githubusercontent.com/nim-lang/atlas/HEAD/install.sh | bash -
       - run: atlas -v
-      - run: atlas init
       - run: atlas install -t --feature:cbor --feature:jsony --feature:msgpack --feature:dev
       - run: nim test
