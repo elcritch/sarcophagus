@@ -12,7 +12,7 @@ requires "https://github.com/yglukhov/bearssl_pkey_decoder#546f8d9b"
 requires "chroniclers"
 
 feature "dev":
-  requires "karax"
+  requires "karax" # web examples
 
 feature "cbor":
   requires "cborious"
@@ -25,4 +25,3 @@ feature "msgpack":
 
 feature "chronicles":
   requires "chroniclers[chronicles] >= 0.2.1"
-
