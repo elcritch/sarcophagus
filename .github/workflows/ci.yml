@@ -20,7 +20,7 @@ jobs:
           path: deps
           key: ${{ runner.os }}-atlas-${{ hashFiles('sarcophagus.nimble') }}
           restore-keys: |
-            ${{ runner.os }}-atlas-
+            ${{ runner.os }}-atlas-${{ hashFiles('sarcophagus.nimble') }}
       - run: echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
       - run: curl -fsSL https://raw.githubusercontent.com/nim-lang/atlas/HEAD/install.sh | bash -
       - run: atlas -v
