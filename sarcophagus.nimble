@@ -25,3 +25,4 @@ feature "msgpack":
 
 feature "chronicles":
   requires "chroniclers[chronicles] >= 0.2.1"
+
