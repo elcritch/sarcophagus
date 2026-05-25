@@ -25,6 +25,6 @@ jobs:
       - run: mkdir /tmp/atlas
       - run: git clone -b 'experiment/packager' https://github.com/nim-lang/atlas
       - run: cd atlas && nim buildRelease
-      - run: ./atlas/bin/atlas-pkg -v
-      - run: ./atlas/bin/atlas-pkg --feature:cbor --feature:jsony --feature:msgpack --feature:dev
+      - run: ./atlas/bin/atlas -v
+      - run: ./atlas/bin/atlas -t --feature:cbor --feature:jsony --feature:msgpack --feature:dev install
       - run: nim test
