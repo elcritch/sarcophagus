@@ -22,10 +22,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-atlas-${{ hashFiles('sarcophagus.nimble') }}
       - run: echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
-      - run: mkdir /tmp/atlas
-      - run: git clone -b 'experiment/packager' https://github.com/nim-lang/atlas
-      - run: cd atlas && nim buildRelease
-
-      - run: ./atlas/bin/atlas -v
-      - run: ./atlas/bin/atlas -t --feature:cbor --feature:jsony --feature:msgpack --feature:dev install
+      - run: curl -fsSL https://raw.githubusercontent.com/nim-lang/atlas/HEAD/install.sh | bash -
+      - run: atlas -v
+      - run: atlas install -t --feature:cbor --feature:jsony --feature:msgpack --feature:dev
       - run: nim test
