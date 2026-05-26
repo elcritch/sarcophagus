@@ -1,4 +1,4 @@
-import std/[json, options, times]
+import std/[json, options, strutils, times]
 
 import mummy
 
@@ -92,6 +92,35 @@ proc authenticateBrowserLogin*(
 ): BrowserLoginResult =
   result.login = authenticatePasswordLogin(
     config, verifyCredentials, username, password, context, now
+  )
+  if result.login.ok:
+    result.setCookie = some(browserLoginCookieHeader(result.login, cookieConfig, now))
+
+proc passwordLoginContext*(
+    request: Request,
+    requestId = "",
+    tenant = "",
+    metadata: openArray[(string, string)] = [],
+): PasswordLoginContext =
+  ## Adapts a Mummy request into request-adjacent password login context.
+  PasswordLoginContext(
+    remoteAddress: request.remoteAddress.strip(),
+    userAgent: request.headers["User-Agent"].strip(),
+    requestId: requestId.strip(),
+    tenant: tenant.strip(),
+    metadata: @metadata,
+  )
+
+proc authenticateBrowserLogin*(
+    config: PasswordLoginConfig,
+    cookieConfig: BrowserLoginCookieConfig,
+    verifyCredentials: PasswordLoginVerifier,
+    username, password: string,
+    context: PasswordLoginContext,
+    now = nowUnix(),
+): BrowserLoginResult =
+  result.login = authenticatePasswordLogin(
+    config, verifyCredentials.toDecisionVerifier(), username, password, context, now
   )
   if result.login.ok:
     result.setCookie = some(browserLoginCookieHeader(result.login, cookieConfig, now))

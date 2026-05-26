@@ -10,6 +10,11 @@ Sarcophagus supports several security-related building blocks:
 - password-based login session minting
 - request IDs and tracing headers
 
+Examples:
+
+- `examples/karax_browser_login` shows a same-origin Karax app using a signed browser session cookie.
+- `examples/oauth2_karax_login` shows Karax using OAuth2 authorization-code plus PKCE.
+
 This guide explains how those pieces fit together and how to use them safely.
 
 ## What This Guide Covers

@@ -13,6 +13,11 @@ Security guide: [docs/security.md](docs/security.md) covers secure OAuth2,
 signed cookies, browser login flows, CORS/CSRF concerns, request IDs, and
 secret-handling guidance.
 
+Browser-oriented examples live in:
+
+- `examples/karax_browser_login` for same-origin Karax login with an `HttpOnly` session cookie
+- `examples/oauth2_karax_login` for OAuth2 authorization-code login plus PKCE
+
 ## Installation
 
 ```sh
