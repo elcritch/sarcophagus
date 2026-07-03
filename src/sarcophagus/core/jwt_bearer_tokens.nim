@@ -1,4 +1,4 @@
-import std/[base64, json, options, sets, strutils, tables, times]
+import std/[base64, httpclient, json, locks, options, sets, strutils, tables, times]
 
 import jwt
 import chroniclers
@@ -8,6 +8,8 @@ type
     bearerTokenHS256
     bearerTokenRS256
     bearerTokenES256
+
+  JwksFetcher* = proc(url: string): string
 
   SigningKey* = object
     kid*: string
@@ -27,6 +29,7 @@ type
     audience: string
     keys: Table[string, string]
     keyAlgorithms: Table[string, BearerTokenAlgorithm]
+    jwks: JwtJwksCache
 
   BearerTokenSpec* = object
     subject*: string
@@ -57,9 +60,33 @@ type
     claims*: BearerTokenClaims
     failure*: TokenValidationFailure
 
-type TokenHeader = object
-  algorithm: BearerTokenAlgorithm
-  kid: string
+  JwtJwksCache = ref object
+    lock: Lock
+    url: string
+    cacheMaxAgeSeconds: int64
+    unknownKidRefreshCooldownSeconds: int64
+    fetchedAt: int64
+    lastUnknownKidRefreshAt: int64
+    keys: Table[string, string]
+    keyAlgorithms: Table[string, BearerTokenAlgorithm]
+    fetcher: JwksFetcher
+
+type
+  TokenHeader = object
+    algorithm: BearerTokenAlgorithm
+    kid: string
+
+  VerifierKeySet = object
+    keys: Table[string, string]
+    keyAlgorithms: Table[string, BearerTokenAlgorithm]
+
+const
+  jwtVerifierDefaultJwksCacheMaxAgeSeconds* = 600
+  jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds* = 60
+  jwtVerifierDefaultJwksFetchTimeoutMs* = 5000
+  neverFetchedJwksAt = int64.low
+
+proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader
 
 proc nowUnix*(): int64 {.inline.} =
   getTime().toUnix()
@@ -162,24 +189,123 @@ proc addVerifierKey(config: var JwtVerifierConfig, key: SigningKey) =
   config.keys[kid] = material
   config.keyAlgorithms[kid] = key.algorithm
 
-proc initJwtVerifierConfig*(
-    issuer: string, audience: string, keys: openArray[SigningKey]
+proc defaultJwksFetcher(url: string): string =
+  var client =
+    newHttpClient(maxRedirects = 0, timeout = jwtVerifierDefaultJwksFetchTimeoutMs)
+  try:
+    client.getContent(url)
+  finally:
+    client.close()
+
+proc initJwksCache(
+    url: string,
+    cacheMaxAgeSeconds: Positive,
+    unknownKidRefreshCooldownSeconds: Natural,
+    fetcher: JwksFetcher,
+): JwtJwksCache =
+  let trimmedUrl = url.strip()
+  if trimmedUrl.len == 0:
+    return nil
+  if not trimmedUrl.startsWith("https://"):
+    raise newException(ValueError, "jwksUrl must use https")
+
+  let effectiveFetcher = if fetcher.isNil: defaultJwksFetcher else: fetcher
+  new(result)
+  initLock(result.lock)
+  result.url = trimmedUrl
+  result.cacheMaxAgeSeconds = int64(cacheMaxAgeSeconds)
+  result.unknownKidRefreshCooldownSeconds = int64(unknownKidRefreshCooldownSeconds)
+  result.fetchedAt = neverFetchedJwksAt
+  result.lastUnknownKidRefreshAt = neverFetchedJwksAt
+  result.keys = initTable[string, string]()
+  result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
+  result.fetcher = effectiveFetcher
+
+template warnRemoteJwksWithoutSsl(jwksUrl: static[string]) =
+  when jwksUrl.strip().len > 0 and not defined(ssl):
+    {.
+      warning:
+        "Remote JWKS verification was configured without -d:ssl; the default " &
+        "HTTPS fetcher requires SSL support. Compile with -d:ssl or pass a " &
+        "custom jwksFetcher that verifies TLS."
+    .}
+
+proc initJwtVerifierConfigImpl(
+    issuer: string,
+    audience: string,
+    keys: openArray[SigningKey] = [],
+    jwksUrl = "",
+    jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds: Natural =
+      jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+    jwksFetcher: JwksFetcher = nil,
 ): JwtVerifierConfig =
   ## Builds a validation-only JWT verifier config.
   if issuer.strip().len == 0:
     raise newException(ValueError, "issuer must not be empty")
   if audience.strip().len == 0:
     raise newException(ValueError, "audience must not be empty")
-  if keys.len == 0:
-    raise newException(ValueError, "at least one signing key is required")
+  if keys.len == 0 and jwksUrl.strip().len == 0:
+    raise newException(ValueError, "at least one signing key or JWKS URL is required")
 
   result.issuer = issuer.strip()
   result.audience = audience.strip()
   result.keys = initTable[string, string]()
   result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
+  result.jwks = initJwksCache(
+    jwksUrl, jwksCacheMaxAgeSeconds, jwksUnknownKidRefreshCooldownSeconds, jwksFetcher
+  )
 
   for key in keys:
     result.addVerifierKey(key)
+
+proc initJwtVerifierConfig*(
+    issuer: string,
+    audience: string,
+    keys: openArray[SigningKey] = [],
+    jwksUrl = "",
+    jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds: Natural =
+      jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+    jwksFetcher: JwksFetcher = nil,
+): JwtVerifierConfig =
+  ## Builds a validation-only JWT verifier config.
+  initJwtVerifierConfigImpl(
+    issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds, jwksFetcher,
+  )
+
+proc initJwtVerifierConfig*(
+    issuer: string,
+    audience: string,
+    jwksUrl: static[string],
+    keys: openArray[SigningKey] = [],
+    jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds: Natural =
+      jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+): JwtVerifierConfig =
+  ## Builds a validation-only JWT verifier config.
+  warnRemoteJwksWithoutSsl(jwksUrl)
+  initJwtVerifierConfigImpl(
+    issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds, nil,
+  )
+
+proc initJwtVerifierConfig*(
+    issuer: string,
+    audience: string,
+    keys: openArray[SigningKey],
+    jwksUrl: static[string],
+    jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds: Natural =
+      jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+): JwtVerifierConfig =
+  ## Builds a validation-only JWT verifier config.
+  warnRemoteJwksWithoutSsl(jwksUrl)
+  initJwtVerifierConfigImpl(
+    issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds, nil,
+  )
 
 proc issuer*(config: JwtVerifierConfig): lent string =
   config.issuer
@@ -187,11 +313,49 @@ proc issuer*(config: JwtVerifierConfig): lent string =
 proc audience*(config: JwtVerifierConfig): lent string =
   config.audience
 
+proc jwksUrl*(config: JwtVerifierConfig): string =
+  if config.jwks.isNil:
+    return ""
+  config.jwks.url
+
+proc jwksFetchedAt*(config: JwtVerifierConfig): int64 =
+  if config.jwks.isNil:
+    return 0
+  withLock config.jwks.lock:
+    if config.jwks.fetchedAt == neverFetchedJwksAt:
+      return 0
+    result = config.jwks.fetchedAt
+
+proc jwksCacheMaxAgeSeconds*(config: JwtVerifierConfig): int64 =
+  if config.jwks.isNil:
+    return 0
+  withLock config.jwks.lock:
+    result = config.jwks.cacheMaxAgeSeconds
+
+proc jwksUnknownKidRefreshCooldownSeconds*(config: JwtVerifierConfig): int64 =
+  if config.jwks.isNil:
+    return 0
+  withLock config.jwks.lock:
+    result = config.jwks.unknownKidRefreshCooldownSeconds
+
 proc len*(config: JwtVerifierConfig): int =
-  config.keys.len
+  var kids = initHashSet[string]()
+  for kid in config.keys.keys:
+    kids.incl(kid)
+  if not config.jwks.isNil:
+    withLock config.jwks.lock:
+      for kid in config.jwks.keys.keys:
+        kids.incl(kid)
+  kids.len
 
 proc contains*(config: JwtVerifierConfig, kid: string): bool =
-  kid.strip() in config.keys
+  let trimmedKid = kid.strip()
+  if trimmedKid in config.keys:
+    return true
+  if config.jwks.isNil:
+    return false
+  withLock config.jwks.lock:
+    result = trimmedKid in config.jwks.keys
 
 proc initBearerTokenConfig*(
     issuer: string, audience: string, keys: openArray[SigningKey], activeKid = ""
@@ -263,6 +427,271 @@ proc base64UrlDecode(input: string): string =
   while normalized.len mod 4 != 0:
     normalized.add('=')
   decode(normalized)
+
+proc derByte(value: int): string =
+  result = newString(1)
+  result[0] = char(value)
+
+proc derLength(length: int): string =
+  if length < 0:
+    raise newException(ValueError, "DER length must not be negative")
+  if length < 128:
+    return derByte(length)
+
+  var value = length
+  var bytes = ""
+  while value > 0:
+    bytes = derByte(value and 0xff) & bytes
+    value = value shr 8
+  derByte(0x80 or bytes.len) & bytes
+
+proc derValue(tag: int, content: string): string =
+  derByte(tag) & derLength(content.len) & content
+
+proc derSequence(parts: varargs[string]): string =
+  var content = ""
+  for part in parts:
+    content.add(part)
+  derValue(0x30, content)
+
+proc stripLeadingZeroBytes(bytes: string): string =
+  if bytes.len == 0:
+    return ""
+  var start = 0
+  while start < bytes.high and bytes[start] == char(0):
+    inc start
+  bytes[start .. ^1]
+
+proc derInteger(rawBytes: string): string =
+  var bytes = stripLeadingZeroBytes(rawBytes)
+  if bytes.len == 0:
+    bytes = "\0"
+  if (ord(bytes[0]) and 0x80) != 0:
+    bytes = "\0" & bytes
+  derValue(0x02, bytes)
+
+proc derBitString(bytes: string): string =
+  derValue(0x03, "\0" & bytes)
+
+proc publicKeyPemFromDer(der: string): string =
+  let encoded = encode(der)
+  result = "-----BEGIN PUBLIC KEY-----\n"
+  var offset = 0
+  while offset < encoded.len:
+    let nextOffset = min(offset + 64, encoded.len)
+    result.add(encoded[offset ..< nextOffset])
+    result.add('\n')
+    offset = nextOffset
+  result.add("-----END PUBLIC KEY-----")
+
+proc jwkString(jwk: JsonNode, key: string): string =
+  if jwk.kind != JObject or not jwk.hasKey(key) or jwk[key].kind != JString:
+    raise newException(ValueError, "jwk " & key & " must be a string")
+  jwk[key].getStr()
+
+proc optionalJwkString(jwk: JsonNode, key: string): string =
+  if jwk.kind != JObject or not jwk.hasKey(key):
+    return ""
+  if jwk[key].kind != JString:
+    raise newException(ValueError, "jwk " & key & " must be a string")
+  jwk[key].getStr()
+
+proc jwkAllowsVerification(jwk: JsonNode): bool =
+  let keyUse = optionalJwkString(jwk, "use")
+  if keyUse.len > 0 and keyUse != "sig":
+    return false
+
+  if not jwk.hasKey("key_ops"):
+    return true
+  if jwk["key_ops"].kind != JArray:
+    raise newException(ValueError, "jwk key_ops must be an array")
+
+  for item in jwk["key_ops"]:
+    if item.kind != JString:
+      raise newException(ValueError, "jwk key_ops entries must be strings")
+    if item.getStr() == "verify":
+      return true
+  false
+
+proc jwkAlgorithm(jwk: JsonNode): Option[BearerTokenAlgorithm] =
+  let rawAlgorithm = optionalJwkString(jwk, "alg")
+  if rawAlgorithm.len > 0:
+    try:
+      let algorithm = parseBearerTokenAlgorithm(rawAlgorithm)
+      if algorithm in {bearerTokenRS256, bearerTokenES256}:
+        return some(algorithm)
+      return none(BearerTokenAlgorithm)
+    except ValueError:
+      return none(BearerTokenAlgorithm)
+
+  case optionalJwkString(jwk, "kty")
+  of "RSA":
+    some(bearerTokenRS256)
+  of "EC":
+    if optionalJwkString(jwk, "crv") == "P-256":
+      some(bearerTokenES256)
+    else:
+      none(BearerTokenAlgorithm)
+  else:
+    none(BearerTokenAlgorithm)
+
+proc rsaJwkPublicKeyPem(jwk: JsonNode): string =
+  if jwkString(jwk, "kty") != "RSA":
+    raise newException(ValueError, "RS256 jwk must use RSA kty")
+
+  let modulus = base64UrlDecode(jwkString(jwk, "n"))
+  let exponent = base64UrlDecode(jwkString(jwk, "e"))
+  if modulus.len == 0 or exponent.len == 0:
+    raise newException(ValueError, "RSA jwk modulus and exponent must not be empty")
+
+  const
+    rsaEncryption = "\x06\x09\x2A\x86\x48\x86\xF7\x0D\x01\x01\x01"
+    derNull = "\x05\x00"
+  let algorithmIdentifier = derSequence(rsaEncryption, derNull)
+  let rsaPublicKey = derSequence(derInteger(modulus), derInteger(exponent))
+  publicKeyPemFromDer(derSequence(algorithmIdentifier, derBitString(rsaPublicKey)))
+
+proc ecP256JwkPublicKeyPem(jwk: JsonNode): string =
+  if jwkString(jwk, "kty") != "EC":
+    raise newException(ValueError, "ES256 jwk must use EC kty")
+  if jwkString(jwk, "crv") != "P-256":
+    raise newException(ValueError, "ES256 jwk must use P-256 crv")
+
+  let x = base64UrlDecode(jwkString(jwk, "x"))
+  let y = base64UrlDecode(jwkString(jwk, "y"))
+  if x.len != 32 or y.len != 32:
+    raise newException(ValueError, "P-256 jwk coordinates must be 32 bytes")
+
+  const
+    ecPublicKey = "\x06\x07\x2A\x86\x48\xCE\x3D\x02\x01"
+    prime256v1 = "\x06\x08\x2A\x86\x48\xCE\x3D\x03\x01\x07"
+  let algorithmIdentifier = derSequence(ecPublicKey, prime256v1)
+  let publicPoint = "\x04" & x & y
+  publicKeyPemFromDer(derSequence(algorithmIdentifier, derBitString(publicPoint)))
+
+proc signingKeyFromJwk(jwk: JsonNode): Option[SigningKey] =
+  if jwk.kind != JObject:
+    raise newException(ValueError, "jwks keys must be objects")
+  if not jwkAllowsVerification(jwk):
+    return none(SigningKey)
+
+  let algorithm = jwkAlgorithm(jwk)
+  if algorithm.isNone():
+    return none(SigningKey)
+
+  let kid = jwkString(jwk, "kid").strip()
+  if kid.len == 0:
+    raise newException(ValueError, "jwk kid must not be empty")
+
+  case algorithm.get()
+  of bearerTokenRS256:
+    some(initPublicSigningKey(kid, rsaJwkPublicKeyPem(jwk), bearerTokenRS256))
+  of bearerTokenES256:
+    some(initPublicSigningKey(kid, ecP256JwkPublicKeyPem(jwk), bearerTokenES256))
+  of bearerTokenHS256:
+    none(SigningKey)
+
+proc parseJwksSigningKeys*(jwksJson: string): seq[SigningKey] =
+  ## Parses supported public signing keys from a JWKS document.
+  let root = parseJson(jwksJson)
+  if root.kind != JObject or not root.hasKey("keys") or root["keys"].kind != JArray:
+    raise newException(ValueError, "jwks must contain a keys array")
+
+  var seen = initHashSet[string]()
+  for jwk in root["keys"]:
+    let key = signingKeyFromJwk(jwk)
+    if key.isSome():
+      let kid = key.get().kid
+      if kid in seen:
+        raise newException(ValueError, "duplicate jwk key id: " & kid)
+      seen.incl(kid)
+      result.add(key.get())
+
+proc verifierKeysFromJwks(jwksJson: string): VerifierKeySet =
+  result.keys = initTable[string, string]()
+  result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
+  for key in parseJwksSigningKeys(jwksJson):
+    let kid = key.kid.strip()
+    result.keys[kid] = key.keyMaterial()
+    result.keyAlgorithms[kid] = key.algorithm
+
+proc loadJwks(cache: JwtJwksCache, keySet: VerifierKeySet, now: int64) =
+  withLock cache.lock:
+    cache.keys = keySet.keys
+    cache.keyAlgorithms = keySet.keyAlgorithms
+    cache.fetchedAt = now
+
+proc jwksNeedsRefresh(cache: JwtJwksCache, now: int64): bool =
+  withLock cache.lock:
+    result =
+      cache.fetchedAt == neverFetchedJwksAt or
+      now - cache.fetchedAt >= cache.cacheMaxAgeSeconds
+
+proc shouldRefreshUnknownKid(cache: JwtJwksCache, now: int64): bool =
+  withLock cache.lock:
+    result =
+      cache.lastUnknownKidRefreshAt == neverFetchedJwksAt or
+      cache.unknownKidRefreshCooldownSeconds == 0 or
+      now - cache.lastUnknownKidRefreshAt >= cache.unknownKidRefreshCooldownSeconds
+    if result:
+      cache.lastUnknownKidRefreshAt = now
+
+proc refreshJwksCache(cache: JwtJwksCache, now: int64): bool =
+  if cache.isNil:
+    return true
+  try:
+    let keySet = verifierKeysFromJwks(cache.fetcher(cache.url))
+    cache.loadJwks(keySet, now)
+    var cacheMaxAgeSeconds: int64
+    withLock cache.lock:
+      cacheMaxAgeSeconds = cache.cacheMaxAgeSeconds
+    debug "jwks refreshed",
+      jwksUrl = cache.url,
+      keyCount = keySet.keys.len,
+      cacheMaxAgeSeconds = cacheMaxAgeSeconds
+    true
+  except CatchableError as e:
+    notice "jwks refresh failed", jwksUrl = cache.url, message = e.msg
+    false
+
+proc refreshJwks*(config: JwtVerifierConfig, now = nowUnix()): bool =
+  ## Refreshes a configured JWKS cache immediately.
+  if config.jwks.isNil:
+    raise newException(ValueError, "JwtVerifierConfig has no JWKS URL")
+  config.jwks.refreshJwksCache(now)
+
+proc effectiveVerifierKeys(config: JwtVerifierConfig): VerifierKeySet =
+  result.keys = config.keys
+  result.keyAlgorithms = config.keyAlgorithms
+  if config.jwks.isNil:
+    return
+
+  withLock config.jwks.lock:
+    for kid, material in config.jwks.keys:
+      if kid notin result.keys:
+        result.keys[kid] = material
+        result.keyAlgorithms[kid] = config.jwks.keyAlgorithms[kid]
+
+proc effectiveVerifierKeys(
+    config: JwtVerifierConfig, token: string, now: int64
+): VerifierKeySet =
+  if config.jwks.isNil:
+    return config.effectiveVerifierKeys()
+
+  var attemptedRefresh = false
+  if config.jwks.jwksNeedsRefresh(now):
+    attemptedRefresh = true
+    discard config.jwks.refreshJwksCache(now)
+
+  result = config.effectiveVerifierKeys()
+  try:
+    let header = parseTokenHeader(token.strip(), "")
+    if header.kid.len > 0 and header.kid notin result.keys and not attemptedRefresh:
+      if config.jwks.shouldRefreshUnknownKid(now):
+        discard config.jwks.refreshJwksCache(now)
+        result = config.effectiveVerifierKeys()
+  except CatchableError:
+    discard
 
 proc hmacSha256(message: string, secret: string): seq[byte] =
   signString(message, secret, HS256)
@@ -563,9 +992,10 @@ proc validateBearerToken*(
     requiredScopes: openArray[string] = [],
     now = nowUnix(),
 ): TokenValidationResult =
+  let verifierKeys = config.effectiveVerifierKeys(token, now)
   validateBearerTokenInternal(
-    config.issuer, config.audience, config.keys, config.keyAlgorithms, "", token,
-    requiredScopes, now,
+    config.issuer, config.audience, verifierKeys.keys, verifierKeys.keyAlgorithms, "",
+    token, requiredScopes, now,
   )
 
 proc validateBearerToken*(

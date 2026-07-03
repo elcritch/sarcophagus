@@ -616,6 +616,23 @@ let validation = validateBearerToken(externalVerifier, externalAccessToken)
 doAssert validation.ok
 ```
 
+For providers that expose a JWKS endpoint, configure a verifier with a JWKS URL.
+The cache defaults to 600 seconds, matching Supabase's documented edge-cache
+window. Validation refreshes once early when a token uses an unknown `kid`, then
+rate-limits additional unknown-`kid` refresh attempts for 60 seconds by default:
+
+```nim
+let supabaseVerifier = initJwtVerifierConfig(
+  issuer = "https://project-id.supabase.co/auth/v1",
+  audience = "authenticated",
+  jwksUrl = "https://project-id.supabase.co/auth/v1/.well-known/jwks.json",
+  jwksUnknownKidRefreshCooldownSeconds = 60,
+)
+
+let validation = validateBearerToken(supabaseVerifier, supabaseAccessToken)
+doAssert validation.ok
+```
+
 Important helpers:
 
 - `parseScopeList` accepts space, comma, tab, and newline separated scopes.
@@ -624,9 +641,13 @@ Important helpers:
 - `parseSigningKeys` parses `kid:secret,kid2:secret2` strings for configuration.
 - `initJwtVerifierConfig` configures validation-only JWT verification.
 - `initPublicSigningKey` configures RS256 and ES256 public-key verification.
+- `parseJwksSigningKeys` converts supported RSA and P-256 JWKS entries into
+  verifier keys.
+- `refreshJwks` refreshes a configured JWKS cache explicitly.
 
 `JwtVerifierConfig` exposes read-only issuer, audience, length, and key-id
-membership accessors. It does not expose configured key material.
+membership accessors, plus JWKS URL, fetch timestamp, and cache-age accessors.
+It does not expose configured key material.
 
 Validation checks JWT header `alg`, `kid`, and `typ` before claims are parsed or
 trusted. Unsupported algorithms, malformed key ids, unknown keys, and non-JWT
@@ -640,6 +661,13 @@ Use stable `kid` values and rotate verifier keys by adding new keys, then
 removing retired keys after issued tokens expire. For locally minted HS256
 tokens, rotate by adding new keys, changing `activeKid`, then removing retired
 keys after issued tokens expire.
+
+JWKS loading supports `RS256` RSA keys and `ES256` P-256 keys. Symmetric JWKS
+entries are ignored because they cannot be verified with public-key material.
+The default network fetcher requires an `https://` JWKS URL, disables redirects,
+and uses a 5000 ms timeout. Literal remote JWKS URLs emit a compile-time warning
+when the module is built without `-d:ssl`; compile with `-d:ssl` for the default
+HTTPS fetcher or pass a custom `jwksFetcher` that verifies TLS.
 
 ## Development
 

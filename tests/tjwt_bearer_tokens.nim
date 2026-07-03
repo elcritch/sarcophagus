@@ -53,6 +53,16 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEVs/o5+uQbTjL3chynL4wXgUg2R9
 q9UU8I5mEovUf86QZ7kOBIjJwqnzD1omageEHWwHdBO6B+dFabmdT9POxg==
 -----END PUBLIC KEY-----"""
+  rsaJwkN =
+    "nzyis1ZjfNB0bBgKFMSvvkTtwlvBsaJq7S5wA-kzeVOVpVWwkWdVha4s38XM_pa_" &
+    "yr47av7-z3VTmvDRyAHcaT92whREFpLv9cj5lTeJSibyr_Mrm_YtjCZVWgaOYIhwr" &
+    "XwKLqPr_11inWsAkfIytvHWTxZYEcXLgAXFuUuaS3uF9gEiNQwzGTU1v0FqkqTBr" &
+    "4B8nW3HCN47XUu0t8Y0e-lf4s4OxQawWD79J9_5d3Ry0vbV3Am1FtGJiJvOwRsI" &
+    "fVChDpYStTcHTCMqtvWbV6L11BWkpzGXSW4Hv43qa-GSYOD2QU68Mb59oSk2OB-B" &
+    "tOLpJofmbGEGgvmwyCI9Mw"
+  rsaJwkE = "AQAB"
+  ec256JwkX = "EVs_o5-uQbTjL3chynL4wXgUg2R9q9UU8I5mEovUf84"
+  ec256JwkY = "kGe5DgSIycKp8w9aJmoHhB1sB3QTugfnRWm5nU_TzsY"
 
 proc externalClaims(): JsonNode =
   %*{
@@ -105,6 +115,35 @@ proc signedExternalToken(algorithm, kid, privateKey: string): string =
 
 proc tokenWithHeader(header: JsonNode): string =
   base64UrlEncodeTest($header) & ".not-json.signature"
+
+proc rsaJwk(kid: string): JsonNode =
+  %*{
+    "kty": "RSA",
+    "kid": kid,
+    "alg": "RS256",
+    "use": "sig",
+    "key_ops": ["verify"],
+    "n": rsaJwkN,
+    "e": rsaJwkE,
+  }
+
+proc ec256Jwk(kid: string): JsonNode =
+  %*{
+    "kty": "EC",
+    "kid": kid,
+    "alg": "ES256",
+    "crv": "P-256",
+    "use": "sig",
+    "key_ops": ["verify"],
+    "x": ec256JwkX,
+    "y": ec256JwkY,
+  }
+
+proc jwksDocument(keys: openArray[JsonNode]): string =
+  var jwks = %*{"keys": []}
+  for key in keys:
+    jwks["keys"].add(key)
+  $jwks
 
 suite "bearer token core":
   test "parseSigningKeys rejects duplicate kids":
@@ -219,6 +258,152 @@ suite "bearer token core":
     check validation.ok
     check validation.claims.subject == "client-1"
     check validation.claims.keyId == "shared-1"
+
+  test "parseJwksSigningKeys converts RSA and P-256 public keys":
+    let keys = parseJwksSigningKeys(jwksDocument([rsaJwk("rsa-1"), ec256Jwk("ec-1")]))
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer", audience = "external-api", keys = keys
+    )
+
+    check verifier.len == 2
+    check "rsa-1" in verifier
+    check "ec-1" in verifier
+
+    let rsaToken = signedExternalToken("RS256", "rsa-1", rsPrivateKey)
+    let rsaValidation = validateBearerToken(verifier, rsaToken, now = 1_700_000_010)
+    check rsaValidation.ok
+    check rsaValidation.claims.keyId == "rsa-1"
+
+    let ecToken = signedExternalToken("ES256", "ec-1", ec256PrivateKey)
+    let ecValidation = validateBearerToken(verifier, ecToken, now = 1_700_000_010)
+    check ecValidation.ok
+    check ecValidation.claims.keyId == "ec-1"
+
+  test "jwks verifier loads caches expires and refreshes unknown kid":
+    var fetchCount = 0
+    let fetcher: JwksFetcher = proc(url: string): string =
+      check url == "https://project.supabase.co/auth/v1/.well-known/jwks.json"
+      inc fetchCount
+      case fetchCount
+      of 1:
+        jwksDocument([rsaJwk("rsa-1")])
+      of 2:
+        jwksDocument([rsaJwk("rsa-1"), rsaJwk("rsa-2")])
+      else:
+        jwksDocument([rsaJwk("rsa-1"), rsaJwk("rsa-2"), rsaJwk("rsa-3")])
+
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      jwksUrl = "https://project.supabase.co/auth/v1/.well-known/jwks.json",
+      jwksCacheMaxAgeSeconds = 10,
+      jwksFetcher = fetcher,
+    )
+    check verifier.len == 0
+    check verifier.jwksUrl == "https://project.supabase.co/auth/v1/.well-known/jwks.json"
+    check verifier.jwksCacheMaxAgeSeconds == 10
+    check verifier.jwksUnknownKidRefreshCooldownSeconds == 60
+
+    let firstToken = signedExternalToken("RS256", "rsa-1", rsPrivateKey)
+    let firstValidation = validateBearerToken(verifier, firstToken, now = 1_700_000_010)
+    check firstValidation.ok
+    check fetchCount == 1
+    check verifier.jwksFetchedAt == 1_700_000_010
+    check verifier.len == 1
+    check "rsa-1" in verifier
+
+    let cachedValidation =
+      validateBearerToken(verifier, firstToken, now = 1_700_000_015)
+    check cachedValidation.ok
+    check fetchCount == 1
+
+    let rotatedToken = signedExternalToken("RS256", "rsa-2", rsPrivateKey)
+    let rotatedValidation =
+      validateBearerToken(verifier, rotatedToken, now = 1_700_000_016)
+    check rotatedValidation.ok
+    check fetchCount == 2
+    check "rsa-2" in verifier
+    check verifier.jwksFetchedAt == 1_700_000_016
+
+    let suppressedToken = signedExternalToken("RS256", "rsa-3", rsPrivateKey)
+    let suppressedValidation =
+      validateBearerToken(verifier, suppressedToken, now = 1_700_000_017)
+    check not suppressedValidation.ok
+    check suppressedValidation.failure.message == "Unknown token key id"
+    check fetchCount == 2
+    check "rsa-3" notin verifier
+
+    let laterUnknownValidation =
+      validateBearerToken(verifier, suppressedToken, now = 1_700_000_077)
+    check laterUnknownValidation.ok
+    check fetchCount == 3
+    check "rsa-3" in verifier
+    check verifier.jwksFetchedAt == 1_700_000_077
+
+    let staleValidation =
+      validateBearerToken(verifier, rotatedToken, now = 1_700_000_088)
+    check staleValidation.ok
+    check fetchCount == 4
+    check verifier.jwksFetchedAt == 1_700_000_088
+
+  test "jwks unknown kid cooldown can be disabled":
+    var fetchCount = 0
+    let fetcher: JwksFetcher = proc(url: string): string =
+      check url == "https://project.supabase.co/auth/v1/.well-known/jwks.json"
+      inc fetchCount
+      case fetchCount
+      of 1:
+        jwksDocument([rsaJwk("rsa-1")])
+      of 2:
+        jwksDocument([rsaJwk("rsa-1"), rsaJwk("rsa-2")])
+      else:
+        jwksDocument([rsaJwk("rsa-1"), rsaJwk("rsa-2"), rsaJwk("rsa-3")])
+
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      jwksUrl = "https://project.supabase.co/auth/v1/.well-known/jwks.json",
+      jwksCacheMaxAgeSeconds = 100,
+      jwksUnknownKidRefreshCooldownSeconds = 0,
+      jwksFetcher = fetcher,
+    )
+    check verifier.jwksUnknownKidRefreshCooldownSeconds == 0
+
+    let firstToken = signedExternalToken("RS256", "rsa-1", rsPrivateKey)
+    check validateBearerToken(verifier, firstToken, now = 1_700_000_010).ok
+    check fetchCount == 1
+
+    let secondToken = signedExternalToken("RS256", "rsa-2", rsPrivateKey)
+    check validateBearerToken(verifier, secondToken, now = 1_700_000_011).ok
+    check fetchCount == 2
+
+    let thirdToken = signedExternalToken("RS256", "rsa-3", rsPrivateKey)
+    check validateBearerToken(verifier, thirdToken, now = 1_700_000_012).ok
+    check fetchCount == 3
+
+  test "jwks verifier requires https urls and skips symmetric jwks entries":
+    expect ValueError:
+      discard initJwtVerifierConfig(
+        issuer = "external-issuer",
+        audience = "external-api",
+        jwksUrl = "http://project.supabase.co/auth/v1/.well-known/jwks.json",
+      )
+
+    let keys = parseJwksSigningKeys(
+      jwksDocument(
+        [
+          %*{
+            "kty": "oct",
+            "kid": "shared-1",
+            "alg": "HS256",
+            "use": "sig",
+            "key_ops": ["verify"],
+            "k": "secret",
+          }
+        ]
+      )
+    )
+    check keys.len == 0
 
   test "jwt verifier config rejects tokens without kid":
     let verifier = initJwtVerifierConfig(
