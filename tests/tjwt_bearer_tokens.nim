@@ -55,7 +55,9 @@ q9UU8I5mEovUf86QZ7kOBIjJwqnzD1omageEHWwHdBO6B+dFabmdT9POxg==
 -----END PUBLIC KEY-----"""
 
 proc signedExternalToken(algorithm, kid, privateKey: string): string =
-  let header = %*{"alg": algorithm, "typ": "JWT", "kid": kid}
+  var header = %*{"alg": algorithm, "typ": "JWT"}
+  if kid.len > 0:
+    header["kid"] = newJString(kid)
   let claims =
     %*{
       "iss": "external-issuer",
@@ -134,6 +136,63 @@ suite "bearer token core":
     check validation.claims.subject == "user-123"
     check validation.claims.keyId == "ec-1"
     check validation.claims.scopes == @["sync:read", "profile"]
+
+  test "jwt verifier config validates RS256 tokens without minting config":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+    let token = signedExternalToken("RS256", "rsa-1", rsPrivateKey)
+    let validation =
+      validateBearerToken(verifier, token, ["profile"], now = 1_700_000_010)
+
+    check validation.ok
+    check validation.claims.subject == "user-123"
+    check validation.claims.issuer == "external-issuer"
+    check validation.claims.audience == "external-api"
+    check validation.claims.keyId == "rsa-1"
+
+  test "jwt verifier config validates HS256 tokens without active signing key":
+    let signingConfig = initBearerTokenConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [SigningKey(kid: "shared-1", secret: "shared-secret")],
+    )
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [SigningKey(kid: "shared-1", secret: "shared-secret")],
+    )
+    let token = mintBearerToken(
+      signingConfig,
+      initBearerTokenSpec(
+        subject = "client-1",
+        scopes = ["sync:read"],
+        ttlSeconds = 600,
+        issuedAt = 1_700_000_000,
+      ),
+    )
+    let validation =
+      validateBearerToken(verifier, token, ["sync:read"], now = 1_700_000_010)
+
+    check validation.ok
+    check validation.claims.subject == "client-1"
+    check validation.claims.keyId == "shared-1"
+
+  test "jwt verifier config rejects tokens without kid":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+    let token = signedExternalToken("RS256", "", rsPrivateKey)
+    let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+    check not validation.ok
+    check validation.failure.statusCode == 401
+    check validation.failure.code == "invalid_token"
+    check validation.failure.message == "Token key id is missing"
 
   test "validation rejects tokens when alg does not match configured key":
     let config = initBearerTokenConfig(

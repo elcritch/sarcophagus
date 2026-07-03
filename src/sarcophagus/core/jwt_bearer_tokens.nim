@@ -22,6 +22,12 @@ type
     keys*: Table[string, string]
     keyAlgorithms*: Table[string, BearerTokenAlgorithm]
 
+  JwtVerifierConfig* = object
+    issuer*: string
+    audience*: string
+    keys*: Table[string, string]
+    keyAlgorithms*: Table[string, BearerTokenAlgorithm]
+
   BearerTokenSpec* = object
     subject*: string
     scopes*: seq[string]
@@ -144,9 +150,22 @@ proc keyMaterial(key: SigningKey): string =
   of bearerTokenRS256, bearerTokenES256:
     key.publicKey.strip()
 
-proc initBearerTokenConfig*(
-    issuer: string, audience: string, keys: openArray[SigningKey], activeKid = ""
-): BearerTokenConfig =
+proc addVerifierKey(config: var JwtVerifierConfig, key: SigningKey) =
+  let kid = key.kid.strip()
+  let material = key.keyMaterial()
+  if kid.len == 0 or material.len == 0:
+    raise newException(
+      ValueError, "signing keys must include non-empty kid and key material"
+    )
+  if kid in config.keys:
+    raise newException(ValueError, "duplicate signing key id: " & kid)
+  config.keys[kid] = material
+  config.keyAlgorithms[kid] = key.algorithm
+
+proc initJwtVerifierConfig*(
+    issuer: string, audience: string, keys: openArray[SigningKey]
+): JwtVerifierConfig =
+  ## Builds a validation-only JWT verifier config.
   if issuer.strip().len == 0:
     raise newException(ValueError, "issuer must not be empty")
   if audience.strip().len == 0:
@@ -160,16 +179,16 @@ proc initBearerTokenConfig*(
   result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
 
   for key in keys:
-    let kid = key.kid.strip()
-    let material = key.keyMaterial()
-    if kid.len == 0 or material.len == 0:
-      raise newException(
-        ValueError, "signing keys must include non-empty kid and key material"
-      )
-    if kid in result.keys:
-      raise newException(ValueError, "duplicate signing key id: " & kid)
-    result.keys[kid] = material
-    result.keyAlgorithms[kid] = key.algorithm
+    result.addVerifierKey(key)
+
+proc initBearerTokenConfig*(
+    issuer: string, audience: string, keys: openArray[SigningKey], activeKid = ""
+): BearerTokenConfig =
+  let verifier = initJwtVerifierConfig(issuer, audience, keys)
+  result.issuer = verifier.issuer
+  result.audience = verifier.audience
+  result.keys = verifier.keys
+  result.keyAlgorithms = verifier.keyAlgorithms
 
   result.activeKid =
     if activeKid.strip().len > 0:
@@ -241,13 +260,20 @@ proc looksLikePemKey(value: string): bool =
   normalized.startsWith("-----BEGIN ") and " KEY-----" in normalized
 
 proc keyAlgorithm(
-    config: BearerTokenConfig, kid: string
+    keys: Table[string, string],
+    keyAlgorithms: Table[string, BearerTokenAlgorithm],
+    kid: string,
 ): Option[BearerTokenAlgorithm] =
-  if kid in config.keyAlgorithms:
-    return some(config.keyAlgorithms[kid])
-  if kid in config.keys and config.keys[kid].looksLikePemKey():
+  if kid in keyAlgorithms:
+    return some(keyAlgorithms[kid])
+  if kid in keys and keys[kid].looksLikePemKey():
     return none(BearerTokenAlgorithm)
   some(bearerTokenHS256)
+
+proc keyAlgorithm(
+    config: BearerTokenConfig, kid: string
+): Option[BearerTokenAlgorithm] =
+  keyAlgorithm(config.keys, config.keyAlgorithms, kid)
 
 proc constantTimeEquals(lhs: string, rhs: string): bool =
   var diff = lhs.len xor rhs.len
@@ -364,13 +390,12 @@ proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader =
     result.kid = kid
 
 proc verifySignature(
-    config: BearerTokenConfig,
-    header: TokenHeader,
+    key: string,
+    algorithm: BearerTokenAlgorithm,
     signingInput: string,
     signaturePart: string,
 ): bool =
-  let key = config.keys[header.kid]
-  case header.algorithm
+  case algorithm
   of bearerTokenHS256:
     let expectedSignature = base64UrlEncodeBytes(hmacSha256(signingInput, key))
     constantTimeEquals(expectedSignature, signaturePart)
@@ -378,7 +403,7 @@ proc verifySignature(
     let signature = base64UrlDecodeBytes(signaturePart)
     if signature.len == 0:
       return false
-    verifySignature(signingInput, signature, key, header.algorithm.toJwtAlgorithm())
+    verifySignature(signingInput, signature, key, algorithm.toJwtAlgorithm())
 
 proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string =
   if config.activeKid.len == 0 or config.activeKid notin config.keys:
@@ -424,8 +449,12 @@ proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string 
 
   signingInput & "." & signaturePart
 
-proc validateBearerToken*(
-    config: BearerTokenConfig,
+proc validateBearerTokenInternal(
+    issuer: string,
+    audience: string,
+    keys: Table[string, string],
+    keyAlgorithms: Table[string, BearerTokenAlgorithm],
+    fallbackKid: string,
     token: string,
     requiredScopes: openArray[string] = [],
     now = nowUnix(),
@@ -441,17 +470,21 @@ proc validateBearerToken*(
     if tokenParts.len != 3:
       return failure(401, "invalid_token", "Malformed bearer token")
 
-    let header = parseTokenHeader(trimmedToken, config.activeKid)
-    if header.kid notin config.keys:
+    let header = parseTokenHeader(trimmedToken, fallbackKid)
+    if header.kid.len == 0:
+      return failure(401, "invalid_token", "Token key id is missing")
+    if header.kid notin keys:
       return failure(401, "invalid_token", "Unknown token key id")
-    let configuredAlgorithm = config.keyAlgorithm(header.kid)
+    let configuredAlgorithm = keyAlgorithm(keys, keyAlgorithms, header.kid)
     if configuredAlgorithm.isNone():
       return failure(401, "invalid_token", "Token key algorithm is not configured")
     if header.algorithm != configuredAlgorithm.get():
       return failure(401, "invalid_token", "Token algorithm does not match key")
 
     let signingInput = tokenParts[0] & "." & tokenParts[1]
-    if not config.verifySignature(header, signingInput, tokenParts[2]):
+    if not verifySignature(
+      keys[header.kid], header.algorithm, signingInput, tokenParts[2]
+    ):
       return failure(401, "invalid_token", "Token signature is invalid")
 
     let payload = parseJson(base64UrlDecode(tokenParts[1]))
@@ -459,14 +492,14 @@ proc validateBearerToken*(
       return failure(401, "invalid_token", "Token payload is invalid")
 
     let iss = jsonStringClaim(payload, "iss")
-    if iss.isNone() or iss.get() != config.issuer:
+    if iss.isNone() or iss.get() != issuer:
       return failure(401, "invalid_token", "Token issuer is invalid")
 
     let sub = jsonStringClaim(payload, "sub")
     if sub.isNone() or sub.get().strip().len == 0:
       return failure(401, "invalid_token", "Token subject is invalid")
 
-    if not payloadMatchesAudience(payload, config.audience):
+    if not payloadMatchesAudience(payload, audience):
       return failure(401, "invalid_token", "Token audience is invalid")
 
     let nbf = jsonIntClaim(payload, "nbf")
@@ -493,7 +526,7 @@ proc validateBearerToken*(
       BearerTokenClaims(
         issuer: iss.get(),
         subject: sub.get().strip(),
-        audience: config.audience,
+        audience: audience,
         scopes: tokenScopes,
         tokenId: tokenId,
         keyId: header.kid,
@@ -504,6 +537,28 @@ proc validateBearerToken*(
     )
   except CatchableError as e:
     failure(401, "invalid_token", e.msg)
+
+proc validateBearerToken*(
+    config: JwtVerifierConfig,
+    token: string,
+    requiredScopes: openArray[string] = [],
+    now = nowUnix(),
+): TokenValidationResult =
+  validateBearerTokenInternal(
+    config.issuer, config.audience, config.keys, config.keyAlgorithms, "", token,
+    requiredScopes, now,
+  )
+
+proc validateBearerToken*(
+    config: BearerTokenConfig,
+    token: string,
+    requiredScopes: openArray[string] = [],
+    now = nowUnix(),
+): TokenValidationResult =
+  validateBearerTokenInternal(
+    config.issuer, config.audience, config.keys, config.keyAlgorithms, config.activeKid,
+    token, requiredScopes, now,
+  )
 
 proc bearerTokenFromAuthorizationHeader*(authorizationHeader: string): string =
   let trimmedHeader = authorizationHeader.strip()

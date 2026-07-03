@@ -596,11 +596,11 @@ let validation = validateBearerToken(config, token, requiredScopes = ["jobs:read
 doAssert validation.ok
 ```
 
-For external tokens signed with asymmetric keys, configure public-key verifier
-entries. Sarcophagus validates these tokens but does not mint them:
+For external tokens signed elsewhere, use a validation-only verifier config.
+Sarcophagus validates these tokens but does not mint them:
 
 ```nim
-let externalConfig = initBearerTokenConfig(
+let externalVerifier = initJwtVerifierConfig(
   issuer = "https://project.example/auth/v1",
   audience = "authenticated",
   keys = [
@@ -612,7 +612,7 @@ let externalConfig = initBearerTokenConfig(
   ],
 )
 
-let validation = validateBearerToken(externalConfig, externalAccessToken)
+let validation = validateBearerToken(externalVerifier, externalAccessToken)
 doAssert validation.ok
 ```
 
@@ -622,10 +622,13 @@ Important helpers:
 - `scopeListToString` normalizes scopes for token claims.
 - `hasAllScopes` checks whether a token satisfies required scopes.
 - `parseSigningKeys` parses `kid:secret,kid2:secret2` strings for configuration.
+- `initJwtVerifierConfig` configures validation-only JWT verification.
 - `initPublicSigningKey` configures RS256 and ES256 public-key verification.
 
-Use stable `kid` values and rotate by adding new keys, changing `activeKid`, then
-removing retired keys after issued tokens expire.
+Use stable `kid` values and rotate verifier keys by adding new keys, then
+removing retired keys after issued tokens expire. For locally minted HS256
+tokens, rotate by adding new keys, changing `activeKid`, then removing retired
+keys after issued tokens expire.
 
 ## Development
 

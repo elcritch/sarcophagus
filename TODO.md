@@ -6,7 +6,7 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
 
 - [x] Add support for asymmetric-key bearer tokens, starting with `RS256` and
   `ES256` verification using public keys.
-- [ ] Introduce a JWT verifier config separate from `BearerTokenConfig`, so
+- [x] Introduce a JWT verifier config separate from `BearerTokenConfig`, so
   Sarcophagus can validate external issuer tokens without implying it can mint
   them.
 - [ ] Parse and validate JWT headers for `alg`, `kid`, and `typ`, rejecting
