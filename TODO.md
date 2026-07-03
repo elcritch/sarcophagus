@@ -2,6 +2,29 @@
 
 Potential future Sarcophagus features, roughly ordered by expected leverage.
 
+## Supabase and External JWT Verification
+
+- [ ] Add support for asymmetric-key bearer tokens, starting with `RS256` and
+  `ES256` verification using public keys.
+- [ ] Introduce a JWT verifier config separate from `BearerTokenConfig`, so
+  Sarcophagus can validate external issuer tokens without implying it can mint
+  them.
+- [ ] Parse and validate JWT headers for `alg`, `kid`, and `typ`, rejecting
+  unsupported algorithms and unknown keys before claims are trusted.
+- [ ] Validate standard external JWT claims: issuer, audience, subject,
+  expiration, not-before, issued-at, and key id.
+- [ ] Add JWKS loading and caching for asymmetric providers, including refresh
+  on unknown `kid` and cache-age behavior suitable for Supabase key rotation.
+- [ ] Add a Supabase-oriented helper that derives issuer and JWKS URL from a
+  project URL: `https://<project-ref>.supabase.co/auth/v1`.
+- [ ] Support claim-based authorization for Supabase tokens, including `role`,
+  `client_id`, `user_id`, and optional custom scope claims.
+- [ ] Wire external JWT validation into raw Mummy wrappers and TAPIS security
+  metadata without breaking existing `oauth2(config, scopes)` behavior.
+- [ ] Document the fallback path for legacy Supabase `HS256` projects, where
+  public-key verification is not possible and callers must either use the
+  shared secret locally or call Supabase Auth to verify the token.
+
 ## High Value
 
 - [x] Route-level middleware hooks for pre/post handling, logging, auth
