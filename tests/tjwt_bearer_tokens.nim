@@ -200,6 +200,19 @@ proc jwksDocument(keys: openArray[JsonNode]): string =
     jwks["keys"].add(key)
   $jwks
 
+proc tempKeyPath(name: string): string =
+  getTempDir() / ("sarcophagus-jwt-" & $getCurrentProcessId() & "-" & name)
+
+proc cleanupPath(path: string) =
+  if fileExists(path) or symlinkExists(path):
+    removeFile(path)
+
+proc writeKeyFile(path: string, contents: string, permissions: set[FilePermission]) =
+  cleanupPath(path)
+  writeFile(path, contents)
+  when defined(posix):
+    setFilePermissions(path, permissions)
+
 suite "bearer token core":
   test "parseSigningKeys rejects duplicate kids":
     expect ValueError:
@@ -314,6 +327,169 @@ suite "bearer token core":
       discard initPrivateSigningKey("rsa-1", "", rsPublicKey, bearerTokenRS256)
     expect ValueError:
       discard initPrivateSigningKey("rsa-1", rsPrivateKey, "", bearerTokenRS256)
+
+  test "loads private signing keys from files with strict permissions":
+    let privatePath = tempKeyPath("rsa-private.pem")
+    let publicPath = tempKeyPath("rsa-public.pem")
+    defer:
+      cleanupPath(privatePath)
+      cleanupPath(publicPath)
+
+    writeKeyFile(privatePath, rsPrivateKey, {fpUserRead, fpUserWrite})
+    writeKeyFile(
+      publicPath, rsPublicKey, {fpUserRead, fpUserWrite, fpGroupRead, fpOthersRead}
+    )
+
+    let signingKey = initPrivateSigningKeyFromFiles(
+      kid = "rsa-file",
+      privateKeyPath = privatePath,
+      publicKeyPath = publicPath,
+      algorithm = bearerTokenRS256,
+    )
+    let config = initBearerTokenConfig(
+      issuer = "sam-sync-server", audience = "sam-sync-api", keys = [signingKey]
+    )
+    check config.keys["rsa-file"] == rsPublicKey
+    check config.keys["rsa-file"] != rsPrivateKey
+
+    let token = mintBearerToken(
+      config,
+      initBearerTokenSpec(
+        subject = "client-1",
+        scopes = ["sync:read"],
+        ttlSeconds = 600,
+        issuedAt = 1_700_000_000,
+      ),
+    )
+    let validation =
+      validateBearerToken(config, token, ["sync:read"], now = 1_700_000_010)
+    check validation.ok
+    check validation.claims.keyId == "rsa-file"
+
+  test "loads ES256 private signing keys from files":
+    let privatePath = tempKeyPath("ec-private.pem")
+    let publicPath = tempKeyPath("ec-public.pem")
+    defer:
+      cleanupPath(privatePath)
+      cleanupPath(publicPath)
+
+    writeKeyFile(privatePath, ec256PrivateKey, {fpUserRead, fpUserWrite})
+    writeKeyFile(publicPath, ec256PublicKey, {fpUserRead, fpUserWrite})
+
+    let signingKey = initPrivateSigningKeyFromFiles(
+      kid = "ec-file",
+      privateKeyPath = privatePath,
+      publicKeyPath = publicPath,
+      algorithm = bearerTokenES256,
+    )
+    let config = initBearerTokenConfig(
+      issuer = "sam-sync-server", audience = "sam-sync-api", keys = [signingKey]
+    )
+    let token = mintBearerToken(
+      config,
+      initBearerTokenSpec(
+        subject = "client-1",
+        scopes = ["sync:read"],
+        ttlSeconds = 600,
+        issuedAt = 1_700_000_000,
+      ),
+    )
+    let validation =
+      validateBearerToken(config, token, ["sync:read"], now = 1_700_000_010)
+    check validation.ok
+    check validation.claims.keyId == "ec-file"
+
+  test "private signing key file loader rejects unsafe private permissions":
+    when defined(posix):
+      let privatePath = tempKeyPath("unsafe-private.pem")
+      let publicPath = tempKeyPath("unsafe-public.pem")
+      defer:
+        cleanupPath(privatePath)
+        cleanupPath(publicPath)
+
+      writeKeyFile(privatePath, rsPrivateKey, {fpUserRead, fpUserWrite, fpGroupRead})
+      writeKeyFile(publicPath, rsPublicKey, {fpUserRead, fpUserWrite})
+
+      expect ValueError:
+        discard initPrivateSigningKeyFromFiles(
+          kid = "rsa-file",
+          privateKeyPath = privatePath,
+          publicKeyPath = publicPath,
+          algorithm = bearerTokenRS256,
+        )
+    else:
+      check true
+
+  test "private signing key file loader verifies matching key pairs":
+    let privatePath = tempKeyPath("mismatch-private.pem")
+    let publicPath = tempKeyPath("mismatch-public.pem")
+    defer:
+      cleanupPath(privatePath)
+      cleanupPath(publicPath)
+
+    writeKeyFile(privatePath, rsPrivateKey, {fpUserRead, fpUserWrite})
+    writeKeyFile(publicPath, ec256PublicKey, {fpUserRead, fpUserWrite})
+
+    expect ValueError:
+      discard initPrivateSigningKeyFromFiles(
+        kid = "rsa-file",
+        privateKeyPath = privatePath,
+        publicKeyPath = publicPath,
+        algorithm = bearerTokenRS256,
+      )
+
+  test "private signing key file loader enforces maxBytes":
+    let privatePath = tempKeyPath("large-private.pem")
+    let publicPath = tempKeyPath("large-public.pem")
+    defer:
+      cleanupPath(privatePath)
+      cleanupPath(publicPath)
+
+    writeKeyFile(privatePath, rsPrivateKey, {fpUserRead, fpUserWrite})
+    writeKeyFile(publicPath, rsPublicKey, {fpUserRead, fpUserWrite})
+
+    expect ValueError:
+      discard initPrivateSigningKeyFromFiles(
+        kid = "rsa-file",
+        privateKeyPath = privatePath,
+        publicKeyPath = publicPath,
+        algorithm = bearerTokenRS256,
+        policy = initPrivateSigningKeyFilePolicy(maxBytes = 16),
+      )
+
+  test "private signing key file loader rejects symlinks unless allowed":
+    when defined(posix):
+      let privateTargetPath = tempKeyPath("target-private.pem")
+      let privateLinkPath = tempKeyPath("link-private.pem")
+      let publicPath = tempKeyPath("link-public.pem")
+      defer:
+        cleanupPath(privateLinkPath)
+        cleanupPath(privateTargetPath)
+        cleanupPath(publicPath)
+
+      writeKeyFile(privateTargetPath, rsPrivateKey, {fpUserRead, fpUserWrite})
+      writeKeyFile(publicPath, rsPublicKey, {fpUserRead, fpUserWrite})
+      cleanupPath(privateLinkPath)
+      createSymlink(privateTargetPath, privateLinkPath)
+
+      expect ValueError:
+        discard initPrivateSigningKeyFromFiles(
+          kid = "rsa-file",
+          privateKeyPath = privateLinkPath,
+          publicKeyPath = publicPath,
+          algorithm = bearerTokenRS256,
+        )
+
+      let signingKey = initPrivateSigningKeyFromFiles(
+        kid = "rsa-file",
+        privateKeyPath = privateLinkPath,
+        publicKeyPath = publicPath,
+        algorithm = bearerTokenRS256,
+        policy = initPrivateSigningKeyFilePolicy(allowSymlink = true),
+      )
+      check signingKey.publicKey == rsPublicKey
+    else:
+      check true
 
   test "validates RS256 tokens with a public key":
     let config = initBearerTokenConfig(

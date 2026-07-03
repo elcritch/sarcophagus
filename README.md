@@ -675,6 +675,26 @@ let token = mintBearerToken(
 )
 ```
 
+If the key material lives in PEM files, use the file-loading helper. By default
+it rejects private-key files that are symlinks, empty, larger than 64 KiB, or
+group/world accessible on POSIX systems, and verifies that the private and
+public keys form a working pair for the selected algorithm.
+
+```nim
+let signingKey = initPrivateSigningKeyFromFiles(
+  kid = "rsa-1",
+  privateKeyPath = "/run/secrets/jwt_private.pem",
+  publicKeyPath = "/run/secrets/jwt_public.pem",
+  algorithm = bearerTokenRS256,
+)
+
+let config = initBearerTokenConfig(
+  issuer = "example-server",
+  audience = "example-api",
+  keys = [signingKey],
+)
+```
+
 For external tokens signed elsewhere, use a validation-only verifier config.
 Sarcophagus validates these tokens but does not mint them:
 
@@ -845,6 +865,10 @@ Important helpers:
 - `parseSigningKeys` parses `kid:secret,kid2:secret2` strings for configuration.
 - `initPrivateSigningKey` configures RS256 and ES256 private-key minting with
   matching public-key verification.
+- `initPrivateSigningKeyFromFiles` loads RS256 and ES256 PEM keys from files,
+  checks the private-key file policy, and verifies the key pair before use.
+- `initPrivateSigningKeyFilePolicy` customizes the file helper's symlink,
+  owner-only permission, and max-size checks.
 - `initJwtVerifierConfig` configures validation-only JWT verification.
 - `initPublicSigningKey` configures RS256 and ES256 public-key verification.
 - `initJwtScopeClaim` maps JWT claim values into `prefix:value` scopes.

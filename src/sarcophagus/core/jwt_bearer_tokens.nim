@@ -1,5 +1,5 @@
 import
-  std/[base64, httpclient, json, locks, options, sets, strutils, tables, times, uri]
+  std/[base64, httpclient, json, locks, options, os, sets, strutils, tables, times, uri]
 
 import jwt
 import chroniclers
@@ -18,6 +18,11 @@ type
     privateKey: string
     publicKey*: string
     algorithm*: BearerTokenAlgorithm
+
+  PrivateSigningKeyFilePolicy* = object
+    requireOwnerOnly*: bool
+    allowSymlink*: bool
+    maxBytes*: Natural
 
   JwtScopeClaim* = object
     claimName: string
@@ -104,6 +109,12 @@ type
     keyAlgorithms: Table[string, BearerTokenAlgorithm]
 
 const
+  privateSigningKeyFileDefaultMaxBytes* = 64 * 1024
+  defaultPrivateSigningKeyFilePolicy* = PrivateSigningKeyFilePolicy(
+    requireOwnerOnly: true,
+    allowSymlink: false,
+    maxBytes: privateSigningKeyFileDefaultMaxBytes,
+  )
   jwtVerifierDefaultJwksCacheMaxAgeSeconds* = 600
   jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds* = 60
   jwtVerifierDefaultJwksFetchTimeoutMs* = 5000
@@ -138,6 +149,139 @@ proc toJwtAlgorithm(algorithm: BearerTokenAlgorithm): SignatureAlgorithm =
   of bearerTokenRS256: RS256
   of bearerTokenES256: ES256
 
+proc initPrivateSigningKeyFilePolicy*(
+    requireOwnerOnly = true,
+    allowSymlink = false,
+    maxBytes: Natural = privateSigningKeyFileDefaultMaxBytes,
+): PrivateSigningKeyFilePolicy =
+  ## Builds file-loading policy for private asymmetric JWT signing keys.
+  if maxBytes == 0:
+    raise newException(ValueError, "private signing key file maxBytes must be positive")
+  PrivateSigningKeyFilePolicy(
+    requireOwnerOnly: requireOwnerOnly, allowSymlink: allowSymlink, maxBytes: maxBytes
+  )
+
+proc validatePrivateSigningKeyFilePolicy(policy: PrivateSigningKeyFilePolicy) =
+  if policy.maxBytes == 0:
+    raise newException(ValueError, "private signing key file maxBytes must be positive")
+  if policy.maxBytes >= high(int):
+    raise newException(ValueError, "private signing key file maxBytes is too large")
+
+proc keyFileInfo(
+    path: string, description: string, policy: PrivateSigningKeyFilePolicy
+): FileInfo =
+  let linkInfo = getFileInfo(path, followSymlink = false)
+  case linkInfo.kind
+  of pcFile:
+    result = linkInfo
+  of pcLinkToFile:
+    if not policy.allowSymlink:
+      raise newException(ValueError, description & " must not be a symlink")
+    result = getFileInfo(path, followSymlink = true)
+    if result.kind != pcFile:
+      raise newException(ValueError, description & " must be a regular file")
+  of pcDir, pcLinkToDir:
+    raise newException(ValueError, description & " must be a regular file")
+
+proc validateKeyFileSize(
+    info: FileInfo, description: string, policy: PrivateSigningKeyFilePolicy
+) =
+  if info.size <= 0:
+    raise newException(ValueError, description & " must not be empty")
+  if info.size > BiggestInt(policy.maxBytes):
+    raise newException(ValueError, description & " exceeds maxBytes")
+
+proc validatePrivateKeyFilePermissions(
+    info: FileInfo, policy: PrivateSigningKeyFilePolicy
+) =
+  if not policy.requireOwnerOnly:
+    return
+
+  when defined(posix):
+    const unsafePermissions = {
+      fpUserExec, fpGroupExec, fpGroupWrite, fpGroupRead, fpOthersExec, fpOthersWrite,
+      fpOthersRead,
+    }
+    if fpUserRead notin info.permissions:
+      raise newException(ValueError, "private signing key file must be user readable")
+    if (info.permissions * unsafePermissions).len > 0:
+      raise newException(
+        ValueError, "private signing key file must be readable only by the file owner"
+      )
+  else:
+    discard
+
+proc readKeyFile(
+    path: string,
+    description: string,
+    policy: PrivateSigningKeyFilePolicy,
+    requireOwnerOnly: bool,
+): string =
+  let trimmedPath = path.strip()
+  if trimmedPath.len == 0:
+    raise newException(ValueError, description & " path must not be empty")
+
+  policy.validatePrivateSigningKeyFilePolicy()
+  let info = keyFileInfo(trimmedPath, description, policy)
+  validateKeyFileSize(info, description, policy)
+  if requireOwnerOnly:
+    validatePrivateKeyFilePermissions(info, policy)
+
+  var file: File
+  if not open(file, trimmedPath, fmRead):
+    raise newException(IOError, description & " could not be opened")
+
+  try:
+    let openedInfo = getFileInfo(file)
+    if openedInfo.kind != pcFile or openedInfo.id != info.id:
+      raise newException(ValueError, description & " changed while loading")
+    validateKeyFileSize(openedInfo, description, policy)
+
+    result = newString(int(policy.maxBytes) + 1)
+    let readLen = file.readChars(toOpenArray(result, 0, result.high))
+    result.setLen(readLen)
+  finally:
+    file.close()
+
+  if result.len == 0:
+    raise newException(ValueError, description & " must not be empty")
+  if result.len > int(policy.maxBytes):
+    raise newException(ValueError, description & " exceeds maxBytes")
+
+proc looksLikePemKey(value: string): bool =
+  let normalized = value.strip().toUpperAscii()
+  normalized.startsWith("-----BEGIN ") and " KEY-----" in normalized
+
+proc looksLikePrivatePemKey(value: string): bool =
+  let normalized = value.strip().toUpperAscii()
+  normalized.startsWith("-----BEGIN ") and "PRIVATE KEY-----" in normalized and
+    normalized.contains("-----END ")
+
+proc looksLikePublicPemKey(value: string): bool =
+  let normalized = value.strip().toUpperAscii()
+  normalized.startsWith("-----BEGIN ") and "PUBLIC KEY-----" in normalized and
+    normalized.contains("-----END ")
+
+proc validatePrivateSigningKeyPair(
+    privateKey, publicKey: string, algorithm: BearerTokenAlgorithm
+) =
+  var valid = false
+  try:
+    let signingInput = "sarcophagus jwt signing key file self-test"
+    let signature = signString(signingInput, privateKey, algorithm.toJwtAlgorithm())
+    valid =
+      signature.len > 0 and
+      verifySignature(signingInput, signature, publicKey, algorithm.toJwtAlgorithm())
+  except CatchableError:
+    valid = false
+
+  if not valid:
+    raise newException(
+      ValueError,
+      "private/public signing key files do not form a valid " &
+        tokenAlgorithmName(algorithm) & " key pair",
+    )
+
 proc initPublicSigningKey*(
     kid: string, publicKey: string, algorithm: BearerTokenAlgorithm
 ): SigningKey =
@@ -159,6 +303,35 @@ proc initPrivateSigningKey*(
   SigningKey(
     kid: kid, privateKey: privateKey, publicKey: publicKey, algorithm: algorithm
   )
+
+proc initPrivateSigningKeyFromFiles*(
+    kid: string,
+    privateKeyPath: string,
+    publicKeyPath: string,
+    algorithm: BearerTokenAlgorithm,
+    policy = defaultPrivateSigningKeyFilePolicy,
+): SigningKey =
+  ## Loads an asymmetric signing key from PEM files and verifies the key pair.
+  if algorithm == bearerTokenHS256:
+    raise newException(ValueError, "private signing keys must use RS256 or ES256")
+
+  let privateKey = readKeyFile(
+    privateKeyPath, "private signing key file", policy, requireOwnerOnly = true
+  )
+  let publicKey = readKeyFile(
+    publicKeyPath, "public signing key file", policy, requireOwnerOnly = false
+  )
+
+  if not privateKey.looksLikePrivatePemKey():
+    raise newException(
+      ValueError, "private signing key file must contain a PEM private key"
+    )
+  if not publicKey.looksLikePublicPemKey():
+    let message = "public signing key file must contain a PEM public key"
+    raise newException(ValueError, message)
+
+  validatePrivateSigningKeyPair(privateKey, publicKey, algorithm)
+  initPrivateSigningKey(kid, privateKey, publicKey, algorithm)
 
 proc scopePart(raw: string, name: string): string =
   result = raw.strip()
@@ -927,10 +1100,6 @@ proc signBearerToken(
     hmacSha256(signingInput, key)
   of bearerTokenRS256, bearerTokenES256:
     signString(signingInput, key, algorithm.toJwtAlgorithm())
-
-proc looksLikePemKey(value: string): bool =
-  let normalized = value.strip().toUpperAscii()
-  normalized.startsWith("-----BEGIN ") and " KEY-----" in normalized
 
 proc keyAlgorithm(
     keys: Table[string, string],
