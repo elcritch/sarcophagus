@@ -15,7 +15,7 @@ feature "dev":
   requires "karax" # web examples
 
 feature "cbor":
-  requires "cborious"
+  requires "cborious >= 0.7.2"
 
 feature "jsony":
   requires "jsony"

@@ -1,4 +1,4 @@
-import std/[json, strutils, unittest]
+import std/[json, strutils, tables, unittest]
 
 import jwt
 import sarcophagus/core/jwt_bearer_tokens
@@ -165,6 +165,44 @@ suite "bearer token core":
     check validation.failure.statusCode == 401
     check validation.failure.code == "invalid_token"
     check validation.failure.message == "Token signature is invalid"
+
+  test "validation rejects PEM keys without configured algorithms":
+    let config = BearerTokenConfig(
+      issuer: "external-issuer",
+      audience: "external-api",
+      activeKid: "rsa-1",
+      keys: {"rsa-1": rsPublicKey}.toTable(),
+    )
+    let token = signedExternalToken("HS256", "rsa-1", rsPublicKey)
+    let validation = validateBearerToken(config, token, now = 1_700_000_010)
+
+    check not validation.ok
+    check validation.failure.statusCode == 401
+    check validation.failure.code == "invalid_token"
+    check validation.failure.message == "Token key algorithm is not configured"
+
+  test "manually constructed HS256 configs remain supported":
+    let config = BearerTokenConfig(
+      issuer: "manual-issuer",
+      audience: "manual-api",
+      activeKid: "v1",
+      keys: {"v1": "secret-a"}.toTable(),
+    )
+    let token = mintBearerToken(
+      config,
+      initBearerTokenSpec(
+        subject = "client-1",
+        scopes = ["sync:read"],
+        ttlSeconds = 600,
+        issuedAt = 1_700_000_000,
+      ),
+    )
+    let validation =
+      validateBearerToken(config, token, ["sync:read"], now = 1_700_000_010)
+
+    check validation.ok
+    check validation.claims.subject == "client-1"
+    check validation.claims.keyId == "v1"
 
   test "minting requires an HS256 active signing key":
     let config = initBearerTokenConfig(

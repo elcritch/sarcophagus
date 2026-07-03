@@ -236,10 +236,18 @@ proc base64UrlDecode(input: string): string =
 proc hmacSha256(message: string, secret: string): seq[byte] =
   signString(message, secret, HS256)
 
-proc keyAlgorithm(config: BearerTokenConfig, kid: string): BearerTokenAlgorithm =
+proc looksLikePemKey(value: string): bool =
+  let normalized = value.strip().toUpperAscii()
+  normalized.startsWith("-----BEGIN ") and " KEY-----" in normalized
+
+proc keyAlgorithm(
+    config: BearerTokenConfig, kid: string
+): Option[BearerTokenAlgorithm] =
   if kid in config.keyAlgorithms:
-    return config.keyAlgorithms[kid]
-  bearerTokenHS256
+    return some(config.keyAlgorithms[kid])
+  if kid in config.keys and config.keys[kid].looksLikePemKey():
+    return none(BearerTokenAlgorithm)
+  some(bearerTokenHS256)
 
 proc constantTimeEquals(lhs: string, rhs: string): bool =
   var diff = lhs.len xor rhs.len
@@ -375,7 +383,8 @@ proc verifySignature(
 proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string =
   if config.activeKid.len == 0 or config.activeKid notin config.keys:
     raise newException(ValueError, "activeKid does not reference a configured key")
-  if config.keyAlgorithm(config.activeKid) != bearerTokenHS256:
+  let activeAlgorithm = config.keyAlgorithm(config.activeKid)
+  if activeAlgorithm.isNone() or activeAlgorithm.get() != bearerTokenHS256:
     raise newException(ValueError, "activeKid must reference an HS256 signing key")
   if spec.subject.strip().len == 0:
     raise newException(ValueError, "subject must not be empty")
@@ -435,7 +444,10 @@ proc validateBearerToken*(
     let header = parseTokenHeader(trimmedToken, config.activeKid)
     if header.kid notin config.keys:
       return failure(401, "invalid_token", "Unknown token key id")
-    if header.algorithm != config.keyAlgorithm(header.kid):
+    let configuredAlgorithm = config.keyAlgorithm(header.kid)
+    if configuredAlgorithm.isNone():
+      return failure(401, "invalid_token", "Token key algorithm is not configured")
+    if header.algorithm != configuredAlgorithm.get():
       return failure(401, "invalid_token", "Token algorithm does not match key")
 
     let signingInput = tokenParts[0] & "." & tokenParts[1]
