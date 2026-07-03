@@ -1,4 +1,4 @@
-import std/[json, strutils, tables, unittest]
+import std/[base64, json, strutils, tables, unittest]
 
 import jwt
 import sarcophagus/core/jwt_bearer_tokens
@@ -71,6 +71,15 @@ proc signedExternalToken(algorithm, kid, privateKey: string): string =
   var token = initJWT(header.toHeader(), claims.toClaims())
   token.sign(privateKey)
   $token
+
+proc base64UrlEncodeTest(input: string): string =
+  result = encode(input)
+  result = result.replace('+', '-')
+  result = result.replace('/', '_')
+  result = result.replace("=", "")
+
+proc tokenWithHeader(header: JsonNode): string =
+  base64UrlEncodeTest($header) & ".not-json.signature"
 
 suite "bearer token core":
   test "parseSigningKeys rejects duplicate kids":
@@ -199,6 +208,62 @@ suite "bearer token core":
     check validation.failure.statusCode == 401
     check validation.failure.code == "invalid_token"
     check validation.failure.message == "Token key id is missing"
+
+  test "header validation rejects unsupported algorithms before payload parsing":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+    let token = tokenWithHeader(%*{"alg": "none", "typ": "JWT", "kid": "rsa-1"})
+    let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+    check not validation.ok
+    check validation.failure.statusCode == 401
+    check validation.failure.code == "invalid_token"
+    check validation.failure.message == "token algorithm is not allowed"
+
+  test "header validation rejects invalid typ before payload parsing":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+    let token = tokenWithHeader(%*{"alg": "RS256", "typ": "JOSE", "kid": "rsa-1"})
+    let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+    check not validation.ok
+    check validation.failure.statusCode == 401
+    check validation.failure.code == "invalid_token"
+    check validation.failure.message == "token typ must be JWT"
+
+  test "header validation rejects non-string kid before payload parsing":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+    let token = tokenWithHeader(%*{"alg": "RS256", "typ": "JWT", "kid": 7})
+    let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+    check not validation.ok
+    check validation.failure.statusCode == 401
+    check validation.failure.code == "invalid_token"
+    check validation.failure.message == "token kid must be a string"
+
+  test "header validation rejects unknown kid before payload parsing":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+    let token = tokenWithHeader(%*{"alg": "RS256", "typ": "JWT", "kid": "missing"})
+    let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+    check not validation.ok
+    check validation.failure.statusCode == 401
+    check validation.failure.code == "invalid_token"
+    check validation.failure.message == "Unknown token key id"
 
   test "validation rejects tokens when alg does not match configured key":
     let config = initBearerTokenConfig(

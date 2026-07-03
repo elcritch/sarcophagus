@@ -628,6 +628,10 @@ Important helpers:
 `JwtVerifierConfig` exposes read-only issuer, audience, length, and key-id
 membership accessors. It does not expose configured key material.
 
+Validation checks JWT header `alg`, `kid`, and `typ` before claims are parsed or
+trusted. Unsupported algorithms, malformed key ids, unknown keys, and non-JWT
+types are rejected as invalid tokens.
+
 Use stable `kid` values and rotate verifier keys by adding new keys, then
 removing retired keys after issued tokens expire. For locally minted HS256
 tokens, rotate by adding new keys, changing `activeKid`, then removing retired

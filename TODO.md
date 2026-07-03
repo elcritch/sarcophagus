@@ -9,7 +9,7 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
 - [x] Introduce a JWT verifier config separate from `BearerTokenConfig`, so
   Sarcophagus can validate external issuer tokens without implying it can mint
   them.
-- [ ] Parse and validate JWT headers for `alg`, `kid`, and `typ`, rejecting
+- [x] Parse and validate JWT headers for `alg`, `kid`, and `typ`, rejecting
   unsupported algorithms and unknown keys before claims are trusted.
 - [ ] Validate standard external JWT claims: issuer, audience, subject,
   expiration, not-before, issued-at, and key id.
