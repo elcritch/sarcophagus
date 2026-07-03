@@ -18,6 +18,10 @@ type
     publicKey*: string
     algorithm*: BearerTokenAlgorithm
 
+  JwtScopeClaim* = object
+    claimName: string
+    scopePrefix: string
+
   BearerTokenConfig* = object
     issuer*: string
     audience*: string
@@ -31,6 +35,7 @@ type
     keys: Table[string, string]
     keyAlgorithms: Table[string, BearerTokenAlgorithm]
     jwks: JwtJwksCache
+    scopeClaims: seq[JwtScopeClaim]
 
   JwtVerifierUrls* = object
     issuer*: string
@@ -56,6 +61,9 @@ type
     subject*: string
     audience*: string
     scopes*: seq[string]
+    role*: string
+    clientId*: string
+    userId*: string
     tokenId*: string
     keyId*: string
     issuedAt*: int64
@@ -135,6 +143,44 @@ proc initPublicSigningKey*(
     raise newException(ValueError, "public signing keys must use RS256 or ES256")
   SigningKey(kid: kid, publicKey: publicKey, algorithm: algorithm)
 
+proc scopePart(raw: string, name: string): string =
+  result = raw.strip()
+  if result.len == 0:
+    raise newException(ValueError, name & " must not be empty")
+  if result.find({' ', '\t', '\n', '\r', ','}) >= 0:
+    raise newException(ValueError, name & " must not contain scope separators")
+
+proc claimScope*(scopePrefix, value: string): string =
+  ## Builds a normalized scope string from a JWT claim name/prefix and value.
+  runnableExamples:
+    doAssert claimScope("role", "authenticated") == "role:authenticated"
+    doAssert claimScope("permission", "photos:read") == "permission:photos:read"
+
+  scopePart(scopePrefix, "scope prefix") & ":" & scopePart(value, "scope value")
+
+proc initJwtScopeClaim*(claimName: string, scopePrefix = ""): JwtScopeClaim =
+  ## Maps a JWT claim's string values into `prefix:value` authorization scopes.
+  let normalizedClaimName = claimName.strip()
+  if normalizedClaimName.len == 0:
+    raise newException(ValueError, "JWT scope claim name must not be empty")
+  if normalizedClaimName.find({' ', '\t', '\n', '\r', ','}) >= 0:
+    raise newException(ValueError, "JWT scope claim name must not contain separators")
+
+  JwtScopeClaim(
+    claimName: normalizedClaimName,
+    scopePrefix:
+      if scopePrefix.strip().len == 0:
+        scopePart(normalizedClaimName, "scope prefix")
+      else:
+        scopePart(scopePrefix, "scope prefix"),
+  )
+
+proc claimName*(scopeClaim: JwtScopeClaim): lent string =
+  scopeClaim.claimName
+
+proc scopePrefix*(scopeClaim: JwtScopeClaim): lent string =
+  scopeClaim.scopePrefix
+
 proc parseScopeList*(raw: string): seq[string] =
   var seen = initHashSet[string]()
   for part in raw.split({' ', '\t', '\n', '\r', ','}):
@@ -202,6 +248,10 @@ proc addVerifierKey(config: var JwtVerifierConfig, key: SigningKey) =
   config.keys[kid] = material
   config.keyAlgorithms[kid] = key.algorithm
 
+proc normalizeScopeClaims(scopeClaims: openArray[JwtScopeClaim]): seq[JwtScopeClaim] =
+  for scopeClaim in scopeClaims:
+    result.add(initJwtScopeClaim(scopeClaim.claimName, scopeClaim.scopePrefix))
+
 proc defaultJwksFetcher(url: string): string =
   var client =
     newHttpClient(maxRedirects = 0, timeout = jwtVerifierDefaultJwksFetchTimeoutMs)
@@ -253,6 +303,7 @@ proc initJwtVerifierConfigImpl(
     jwksUnknownKidRefreshCooldownSeconds: Natural =
       jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
     jwksFetcher: JwksFetcher = nil,
+    scopeClaims: openArray[JwtScopeClaim] = [],
 ): JwtVerifierConfig =
   ## Builds a validation-only JWT verifier config.
   if issuer.strip().len == 0:
@@ -266,6 +317,7 @@ proc initJwtVerifierConfigImpl(
   result.audience = audience.strip()
   result.keys = initTable[string, string]()
   result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
+  result.scopeClaims = normalizeScopeClaims(scopeClaims)
   result.jwks = initJwksCache(
     jwksUrl, jwksCacheMaxAgeSeconds, jwksUnknownKidRefreshCooldownSeconds, jwksFetcher
   )
@@ -282,11 +334,12 @@ proc initJwtVerifierConfig*(
     jwksUnknownKidRefreshCooldownSeconds: Natural =
       jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
     jwksFetcher: JwksFetcher = nil,
+    scopeClaims: openArray[JwtScopeClaim] = [],
 ): JwtVerifierConfig =
   ## Builds a validation-only JWT verifier config.
   initJwtVerifierConfigImpl(
     issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
-    jwksUnknownKidRefreshCooldownSeconds, jwksFetcher,
+    jwksUnknownKidRefreshCooldownSeconds, jwksFetcher, scopeClaims,
   )
 
 proc initJwtVerifierConfig*(
@@ -297,12 +350,13 @@ proc initJwtVerifierConfig*(
     jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
     jwksUnknownKidRefreshCooldownSeconds: Natural =
       jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+    scopeClaims: openArray[JwtScopeClaim] = [],
 ): JwtVerifierConfig =
   ## Builds a validation-only JWT verifier config.
   warnJwtVerifierRemoteJwksWithoutSsl(jwksUrl)
   initJwtVerifierConfigImpl(
     issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
-    jwksUnknownKidRefreshCooldownSeconds, nil,
+    jwksUnknownKidRefreshCooldownSeconds, nil, scopeClaims,
   )
 
 proc initJwtVerifierConfig*(
@@ -313,12 +367,13 @@ proc initJwtVerifierConfig*(
     jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
     jwksUnknownKidRefreshCooldownSeconds: Natural =
       jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+    scopeClaims: openArray[JwtScopeClaim] = [],
 ): JwtVerifierConfig =
   ## Builds a validation-only JWT verifier config.
   warnJwtVerifierRemoteJwksWithoutSsl(jwksUrl)
   initJwtVerifierConfigImpl(
     issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
-    jwksUnknownKidRefreshCooldownSeconds, nil,
+    jwksUnknownKidRefreshCooldownSeconds, nil, scopeClaims,
   )
 
 proc normalizeVerifierUrlPath(raw: string, name: string, allowEmpty: bool): string =
@@ -439,6 +494,9 @@ proc issuer*(config: JwtVerifierConfig): lent string =
 
 proc audience*(config: JwtVerifierConfig): lent string =
   config.audience
+
+proc scopeClaims*(config: JwtVerifierConfig): seq[JwtScopeClaim] =
+  config.scopeClaims
 
 proc jwksUrl*(config: JwtVerifierConfig): string =
   if config.jwks.isNil:
@@ -912,16 +970,55 @@ proc parseScopeClaim(payload: JsonNode): seq[string] =
   let node = payload["scope"]
   case node.kind
   of JString:
-    parseScopeList(node.getStr())
+    result = parseScopeList(node.getStr())
   of JArray:
     var rawScopes: seq[string] = @[]
     for item in node:
       if item.kind != JString:
         raise newException(ValueError, "token scope entries must be strings")
       rawScopes.add(item.getStr())
-    parseScopeList(rawScopes.join(" "))
+    result = parseScopeList(rawScopes.join(" "))
   else:
     raise newException(ValueError, "token scope claim must be a string or array")
+
+proc parseClaimScopeValues(node: JsonNode, claimName: string): seq[string] =
+  case node.kind
+  of JString:
+    result = parseScopeList(node.getStr())
+  of JArray:
+    for item in node:
+      if item.kind != JString:
+        raise newException(
+          ValueError, "token " & claimName & " claim entries must be strings"
+        )
+      for value in parseScopeList(item.getStr()):
+        result.add(value)
+  else:
+    raise newException(
+      ValueError, "token " & claimName & " claim must be a string or array"
+    )
+
+proc parseConfiguredScopeClaims(
+    payload: JsonNode, scopeClaims: openArray[JwtScopeClaim]
+): seq[string] =
+  if payload.kind != JObject:
+    return @[]
+
+  for scopeClaim in scopeClaims:
+    if not payload.hasKey(scopeClaim.claimName):
+      continue
+    for value in parseClaimScopeValues(
+      payload[scopeClaim.claimName], scopeClaim.claimName
+    ):
+      result.add(claimScope(scopeClaim.scopePrefix, value))
+
+proc mergeScopes(scopes, claimScopes: openArray[string]): seq[string] =
+  var allScopes: seq[string] = @[]
+  for scope in scopes:
+    allScopes.add(scope)
+  for scope in claimScopes:
+    allScopes.add(scope)
+  parseScopeList(allScopes.join(" "))
 
 proc base64UrlDecodeBytes(input: string): seq[byte] =
   let decoded = base64UrlDecode(input)
@@ -1022,6 +1119,7 @@ proc validateBearerTokenInternal(
     audience: string,
     keys: Table[string, string],
     keyAlgorithms: Table[string, BearerTokenAlgorithm],
+    scopeClaims: openArray[JwtScopeClaim],
     fallbackKid: string,
     token: string,
     requiredScopes: openArray[string] = [],
@@ -1093,7 +1191,12 @@ proc validateBearerTokenInternal(
       return failure(401, "invalid_token", "Token is expired")
 
     let tokenId = jsonStringClaim(payload, "jti").get("")
-    let tokenScopes = parseScopeClaim(payload)
+    let role = jsonStringClaim(payload, "role").get("").strip()
+    let clientId = jsonStringClaim(payload, "client_id").get("").strip()
+    let userId = jsonStringClaim(payload, "user_id").get("").strip()
+    let tokenScopes = mergeScopes(
+      parseScopeClaim(payload), parseConfiguredScopeClaims(payload, scopeClaims)
+    )
     if not hasAllScopes(tokenScopes, requiredScopes):
       return failure(403, "insufficient_scope", "Token scope is insufficient")
 
@@ -1103,6 +1206,9 @@ proc validateBearerTokenInternal(
         subject: sub.get().strip(),
         audience: audience,
         scopes: tokenScopes,
+        role: role,
+        clientId: clientId,
+        userId: userId,
         tokenId: tokenId,
         keyId: header.kid,
         issuedAt: iat.get(),
@@ -1121,8 +1227,8 @@ proc validateBearerToken*(
 ): TokenValidationResult =
   let verifierKeys = config.effectiveVerifierKeys(token, now)
   validateBearerTokenInternal(
-    config.issuer, config.audience, verifierKeys.keys, verifierKeys.keyAlgorithms, "",
-    token, requiredScopes, now,
+    config.issuer, config.audience, verifierKeys.keys, verifierKeys.keyAlgorithms,
+    config.scopeClaims, "", token, requiredScopes, now,
   )
 
 proc validateBearerToken*(
@@ -1132,8 +1238,15 @@ proc validateBearerToken*(
     now = nowUnix(),
 ): TokenValidationResult =
   validateBearerTokenInternal(
-    config.issuer, config.audience, config.keys, config.keyAlgorithms, config.activeKid,
-    token, requiredScopes, now,
+    config.issuer,
+    config.audience,
+    config.keys,
+    config.keyAlgorithms,
+    [],
+    config.activeKid,
+    token,
+    requiredScopes,
+    now,
   )
 
 proc bearerTokenFromAuthorizationHeader*(authorizationHeader: string): string =

@@ -14,6 +14,23 @@ const
   supabaseJwtJwksPath* = "/auth/v1/.well-known/jwks.json"
   supabaseJwtHostSuffix* = "supabase.co"
 
+proc defaultSupabaseJwtScopeClaims*(): seq[JwtScopeClaim] =
+  ## Builds default Supabase JWT claim-to-scope mappings.
+  @[
+    initJwtScopeClaim("role"),
+    initJwtScopeClaim("client_id"),
+    initJwtScopeClaim("user_id"),
+  ]
+
+proc supabaseJwtScopeClaims*(
+    extraScopeClaims: openArray[JwtScopeClaim] = [], includeDefaultScopeClaims = true
+): seq[JwtScopeClaim] =
+  ## Combines Supabase's default claim scopes with caller-provided mappings.
+  if includeDefaultScopeClaims:
+    result = defaultSupabaseJwtScopeClaims()
+  for scopeClaim in extraScopeClaims:
+    result.add(scopeClaim)
+
 proc initSupabaseJwtVerifierUrlOptions*(): JwtVerifierUrlOptions =
   ## Builds URL derivation options for Supabase Auth JWT verification.
   initJwtVerifierUrlOptions(
@@ -35,6 +52,7 @@ proc initSupabaseJwtVerifierConfigImpl(
     jwksCacheMaxAgeSeconds: Positive,
     jwksUnknownKidRefreshCooldownSeconds: Natural,
     jwksFetcher: JwksFetcher,
+    scopeClaims: openArray[JwtScopeClaim],
 ): JwtVerifierConfig =
   let urls = supabaseJwtVerifierUrls(projectUrl)
   initJwtVerifierConfig(
@@ -45,6 +63,7 @@ proc initSupabaseJwtVerifierConfigImpl(
     jwksCacheMaxAgeSeconds = jwksCacheMaxAgeSeconds,
     jwksUnknownKidRefreshCooldownSeconds = jwksUnknownKidRefreshCooldownSeconds,
     jwksFetcher = jwksFetcher,
+    scopeClaims = scopeClaims,
   )
 
 proc initSupabaseJwtVerifierConfig*(
@@ -55,11 +74,18 @@ proc initSupabaseJwtVerifierConfig*(
     jwksUnknownKidRefreshCooldownSeconds: Natural =
       jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
     jwksFetcher: JwksFetcher = nil,
+    extraScopeClaims: openArray[JwtScopeClaim] = [],
+    includeDefaultScopeClaims = true,
 ): JwtVerifierConfig =
   ## Builds a validation-only JWT verifier config for a Supabase project.
   initSupabaseJwtVerifierConfigImpl(
-    projectUrl, audience, keys, jwksCacheMaxAgeSeconds,
-    jwksUnknownKidRefreshCooldownSeconds, jwksFetcher,
+    projectUrl,
+    audience,
+    keys,
+    jwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds,
+    jwksFetcher,
+    supabaseJwtScopeClaims(extraScopeClaims, includeDefaultScopeClaims),
   )
 
 proc initSupabaseJwtVerifierConfig*(
@@ -69,10 +95,17 @@ proc initSupabaseJwtVerifierConfig*(
     jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
     jwksUnknownKidRefreshCooldownSeconds: Natural =
       jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+    extraScopeClaims: openArray[JwtScopeClaim] = [],
+    includeDefaultScopeClaims = true,
 ): JwtVerifierConfig =
   ## Builds a validation-only JWT verifier config for a Supabase project.
   warnJwtVerifierRemoteJwksWithoutSsl(projectUrl)
   initSupabaseJwtVerifierConfigImpl(
-    projectUrl, audience, keys, jwksCacheMaxAgeSeconds,
-    jwksUnknownKidRefreshCooldownSeconds, nil,
+    projectUrl,
+    audience,
+    keys,
+    jwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds,
+    nil,
+    supabaseJwtScopeClaims(extraScopeClaims, includeDefaultScopeClaims),
   )

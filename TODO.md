@@ -17,7 +17,7 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
   on unknown `kid` and cache-age behavior suitable for Supabase key rotation.
 - [x] Add generic issuer/JWKS URL derivation helpers plus a Supabase module
   that derives URLs from `https://<project-ref>.supabase.co/auth/v1`.
-- [ ] Support claim-based authorization for Supabase tokens, including `role`,
+- [x] Support claim-based authorization for Supabase tokens, including `role`,
   `client_id`, `user_id`, and optional custom scope claims.
 - [ ] Wire external JWT validation into raw Mummy wrappers and TAPIS security
   metadata without breaking existing `oauth2(config, scopes)` behavior.

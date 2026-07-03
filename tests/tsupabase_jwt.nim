@@ -63,6 +63,10 @@ proc signedRs256Token(issuer, audience, kid: string): string =
       "nbf": 1_700_000_000,
       "exp": 1_700_000_600,
       "scope": "sync:read profile",
+      "role": "authenticated",
+      "client_id": "supabase-js",
+      "user_id": "user-123",
+      "permissions": ["photos:read", "photos:write"],
     }
   let header = %*{"alg": "RS256", "typ": "JWT", "kid": kid}
   let signingInput = base64UrlEncodeTest($header) & "." & base64UrlEncodeTest($claims)
@@ -105,16 +109,39 @@ suite "supabase jwt helpers":
       jwksDocument([rsaJwk("rsa-1")])
 
     let verifier = initSupabaseJwtVerifierConfig(
-      projectUrl = "https://project-ref.supabase.co", jwksFetcher = fetcher
+      projectUrl = "https://project-ref.supabase.co",
+      jwksFetcher = fetcher,
+      extraScopeClaims = [initJwtScopeClaim("permissions", "permission")],
     )
     check verifier.issuer == "https://project-ref.supabase.co/auth/v1"
     check verifier.audience == supabaseJwtDefaultAudience
     check verifier.jwksUrl ==
       "https://project-ref.supabase.co/auth/v1/.well-known/jwks.json"
+    check verifier.scopeClaims.len == 4
 
     let token = signedRs256Token(verifier.issuer, supabaseJwtDefaultAudience, "rsa-1")
-    let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+    let validation = validateBearerToken(
+      verifier,
+      token,
+      [
+        claimScope("role", "authenticated"),
+        claimScope("client_id", "supabase-js"),
+        claimScope("user_id", "user-123"),
+        claimScope("permission", "photos:read"),
+      ],
+      now = 1_700_000_010,
+    )
     check validation.ok
+    check validation.claims.role == "authenticated"
+    check validation.claims.clientId == "supabase-js"
+    check validation.claims.userId == "user-123"
+    check hasAllScopes(
+      validation.claims.scopes,
+      [
+        "sync:read", "profile", "role:authenticated", "client_id:supabase-js",
+        "user_id:user-123", "permission:photos:read", "permission:photos:write",
+      ],
+    )
     check fetchCount == 1
 
   test "rejects unsupported project urls":

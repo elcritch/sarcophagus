@@ -232,6 +232,52 @@ suite "bearer token core":
     check validation.claims.audience == "external-api"
     check validation.claims.keyId == "rsa-1"
 
+  test "jwt verifier config authorizes configured claim scopes":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+      scopeClaims = [
+        initJwtScopeClaim("role"),
+        initJwtScopeClaim("client_id"),
+        initJwtScopeClaim("user_id"),
+        initJwtScopeClaim("permissions", "permission"),
+      ],
+    )
+    check verifier.scopeClaims.len == 4
+    check verifier.scopeClaims[0].claimName == "role"
+    check verifier.scopeClaims[0].scopePrefix == "role"
+
+    let claims = externalClaims()
+    claims["role"] = newJString("admin")
+    claims["client_id"] = newJString("admin-ui")
+    claims["user_id"] = newJString("user-123")
+    claims["permissions"] = %*["files:read", "files:write"]
+    let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+    let validation = validateBearerToken(
+      verifier,
+      token,
+      [
+        claimScope("role", "admin"),
+        claimScope("client_id", "admin-ui"),
+        claimScope("user_id", "user-123"),
+        claimScope("permission", "files:read"),
+      ],
+      now = 1_700_000_010,
+    )
+
+    check validation.ok
+    check validation.claims.role == "admin"
+    check validation.claims.clientId == "admin-ui"
+    check validation.claims.userId == "user-123"
+    check hasAllScopes(
+      validation.claims.scopes,
+      [
+        "sync:read", "profile", "role:admin", "client_id:admin-ui", "user_id:user-123",
+        "permission:files:read", "permission:files:write",
+      ],
+    )
+
   test "jwt verifier config validates HS256 tokens without active signing key":
     let signingConfig = initBearerTokenConfig(
       issuer = "external-issuer",

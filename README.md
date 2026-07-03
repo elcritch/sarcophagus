@@ -628,11 +628,31 @@ defaults:
 let supabaseVerifier = initSupabaseJwtVerifierConfig(
   projectUrl = "https://project-id.supabase.co",
   jwksUnknownKidRefreshCooldownSeconds = 60,
+  extraScopeClaims = [initJwtScopeClaim("permissions", "permission")],
 )
 
-let validation = validateBearerToken(supabaseVerifier, supabaseAccessToken)
+let validation = validateBearerToken(
+  supabaseVerifier,
+  supabaseAccessToken,
+  requiredScopes = [
+    claimScope("role", "authenticated"),
+    claimScope("permission", "reports:read"),
+  ],
+)
 doAssert validation.ok
 ```
+
+Supabase verifier configs map `role`, `client_id`, and `user_id` claims into
+authorization scopes by default, such as `role:authenticated`. Additional
+claims can be mapped with `extraScopeClaims`.
+
+The difference is token structure, not trust level. OAuth-style tokens usually
+carry permissions in a `scope` claim, such as `"scope": "photos:read"`.
+Supabase also carries useful authorization facts in separate signed claims, such
+as `"role": "authenticated"` or `"user_id": "user-123"`. `claimScope` builds the
+matching `prefix:value` string for `requiredScopes`, so both forms are checked
+through the same scope authorization path after the JWT signature and standard
+claims have been verified.
 
 Custom provider modules can use the same core helpers:
 
@@ -650,6 +670,7 @@ let externalVerifier = initJwtVerifierConfig(
   issuer = urls.issuer,
   audience = "example-api",
   jwksUrl = urls.jwksUrl,
+  scopeClaims = [initJwtScopeClaim("permissions", "permission")],
 )
 ```
 
@@ -661,6 +682,8 @@ Important helpers:
 - `parseSigningKeys` parses `kid:secret,kid2:secret2` strings for configuration.
 - `initJwtVerifierConfig` configures validation-only JWT verification.
 - `initPublicSigningKey` configures RS256 and ES256 public-key verification.
+- `initJwtScopeClaim` maps JWT claim values into `prefix:value` scopes.
+- `claimScope` builds normalized required scopes for claim-based authorization.
 - `parseJwksSigningKeys` converts supported RSA and P-256 JWKS entries into
   verifier keys.
 - `initJwtVerifierUrlOptions` configures generic provider URL derivation.
@@ -678,9 +701,11 @@ Validation checks JWT header `alg`, `kid`, and `typ` before claims are parsed or
 trusted. Unsupported algorithms, malformed key ids, unknown keys, and non-JWT
 types are rejected as invalid tokens.
 
-Validated claims include `iss`, `aud`, `sub`, `exp`, `iat`, and the header
-`kid`. The optional `nbf` claim is enforced when present, and otherwise defaults
-to `iat` in returned claims.
+Validated claims include `iss`, `aud`, `sub`, `exp`, `iat`, optional
+`role`, `client_id`, `user_id`, and the header `kid`. The optional `nbf` claim
+is enforced when present, and otherwise defaults to `iat` in returned claims.
+Configured claim-scope mappings add their values to `claims.scopes`, so existing
+`requiredScopes` checks can authorize external JWT claims.
 
 Use stable `kid` values and rotate verifier keys by adding new keys, then
 removing retired keys after issued tokens expire. For locally minted HS256
