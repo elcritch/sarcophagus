@@ -2,6 +2,7 @@ import std/[httpclient, json, options, random, strutils, unittest]
 
 import mummy
 
+import jwt_test_fixtures
 import sarcophagus/[core/jwt_bearer_tokens, oauth2/core, tapis]
 from sarcophagus/oauth2 import OAuth2User
 
@@ -102,20 +103,6 @@ proc issueToken(config: OAuth2Config, scope: string): string =
   )
   doAssert token.ok
   token.response.accessToken
-
-proc externalJwtIssuerConfig(): BearerTokenConfig =
-  initBearerTokenConfig(
-    issuer = "external-issuer",
-    audience = "external-api",
-    keys = [SigningKey(kid: "v1", secret: "external-secret")],
-  )
-
-proc externalJwtVerifierConfig(): JwtVerifierConfig =
-  initJwtVerifierConfig(
-    issuer = "external-issuer",
-    audience = "external-api",
-    keys = [SigningKey(kid: "v1", secret: "external-secret")],
-  )
 
 proc readItem(id: int, verbose: Option[bool]): ItemOut {.gcsafe.} =
   ItemOut(id: id, name: "secure-" & $id, verbose: verbose.get(false))
@@ -314,20 +301,26 @@ suite "typed mummy tapis security":
 
   test "protects typed routes with external jwt security":
     randomize()
-    let issuerConfig = externalJwtIssuerConfig()
-    let verifier = externalJwtVerifierConfig()
-    let readToken = mintBearerToken(
-      issuerConfig,
-      initBearerTokenSpec(
-        subject = "external-client", scopes = ["items:read"], ttlSeconds = 600
-      ),
+    var fetchCount = 0
+    let fetcher: JwksFetcher = proc(url: string): string =
+      check url == "https://issuer.example/.well-known/jwks.json"
+      inc fetchCount
+      if fetchCount == 1:
+        testJwksDocument([testRsaJwk("rsa-1")])
+      else:
+        testJwksDocument([testRsaJwk("rsa-1"), testRsaJwk("rsa-2")])
+    let verifier = initJwtVerifierConfig(
+      issuer = testJwtIssuer,
+      audience = testJwtAudience,
+      jwksUrl = "https://issuer.example/.well-known/jwks.json",
+      jwksCacheMaxAgeSeconds = 1,
+      jwksFetcher = fetcher,
     )
-    let writeToken = mintBearerToken(
-      issuerConfig,
-      initBearerTokenSpec(
-        subject = "writer-client", scopes = ["items:write"], ttlSeconds = 600
-      ),
-    )
+    let issuedAt = nowUnix()
+    let readToken =
+      signedTestRs256Jwt("rsa-1", "external-client", ["items:read"], issuedAt)
+    let writeToken =
+      signedTestRs256Jwt("rsa-2", "writer-client", ["items:write"], issuedAt)
     let api = buildExternalJwtApi(verifier)
     let server = newServer(api.router, workerThreads = 1)
     let portNumber = 20000 + rand(20000)
@@ -351,14 +344,15 @@ suite "typed mummy tapis security":
     check unauthenticated.code.int == 401
     check unauthenticated.headers["WWW-Authenticate"] ==
       """Bearer realm="external-api""""
+    check fetchCount == 0
 
-    let outOfScope = client.request(
+    let malformed = client.request(
       baseUrl & "/external-items/14",
       httpMethod = HttpGet,
-      headers = newHttpHeaders({"Authorization": "Bearer " & writeToken}),
+      headers = newHttpHeaders({"Authorization": "Bearer not-a-jwt"}),
     )
-    check outOfScope.code.int == 403
-    check parseJson(outOfScope.body)["error"]["error"].getStr() == "insufficient_scope"
+    check malformed.code.int == 401
+    check fetchCount == 0
 
     let authenticated = client.request(
       baseUrl & "/external-items/14?verbose=true",
@@ -369,6 +363,16 @@ suite "typed mummy tapis security":
     let body = parseJson(authenticated.body)
     check body["id"].getInt() == 14
     check body["verbose"].getBool() == true
+    check fetchCount == 1
+
+    let outOfScope = client.request(
+      baseUrl & "/external-items/14",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & writeToken}),
+    )
+    check outOfScope.code.int == 403
+    check parseJson(outOfScope.body)["error"]["error"].getStr() == "insufficient_scope"
+    check fetchCount == 2
 
     let openApi = client.get(baseUrl & "/swagger.json")
     check openApi.code.int == 200

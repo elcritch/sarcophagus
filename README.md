@@ -623,9 +623,9 @@ true for those legacy hashes so they can be rotated to the fast format.
 
 ## `sarcophagus/core/jwt_bearer_tokens`
 
-The bearer-token module mints signed HS256 JWT bearer tokens and validates
-HS256, RS256, and ES256 bearer tokens. OAuth2 uses this module internally, but
-it is also usable directly for service-to-service tokens.
+The bearer-token module mints signed HS256, RS256, and ES256 JWT bearer tokens
+and validates HS256, RS256, and ES256 bearer tokens. OAuth2 uses this module
+internally, but it is also usable directly for service-to-service tokens.
 
 ```nim
 let config = initBearerTokenConfig(
@@ -645,6 +645,34 @@ let token = mintBearerToken(
 
 let validation = validateBearerToken(config, token, requiredScopes = ["jobs:read"])
 doAssert validation.ok
+```
+
+For locally minted asymmetric tokens, pass a private signing key with its
+matching public verifier key. Sarcophagus stores the public key for validation
+and uses the private key only when minting from `BearerTokenConfig`.
+
+```nim
+let config = initBearerTokenConfig(
+  issuer = "example-server",
+  audience = "example-api",
+  keys = [
+    initPrivateSigningKey(
+      kid = "rsa-1",
+      privateKey = privateKeyPem,
+      publicKey = publicKeyPem,
+      algorithm = bearerTokenRS256,
+    )
+  ],
+)
+
+let token = mintBearerToken(
+  config,
+  initBearerTokenSpec(
+    subject = "worker-1",
+    scopes = ["jobs:read"],
+    ttlSeconds = 300,
+  ),
+)
 ```
 
 For external tokens signed elsewhere, use a validation-only verifier config.
@@ -815,6 +843,8 @@ Important helpers:
 - `scopeListToString` normalizes scopes for token claims.
 - `hasAllScopes` checks whether a token satisfies required scopes.
 - `parseSigningKeys` parses `kid:secret,kid2:secret2` strings for configuration.
+- `initPrivateSigningKey` configures RS256 and ES256 private-key minting with
+  matching public-key verification.
 - `initJwtVerifierConfig` configures validation-only JWT verification.
 - `initPublicSigningKey` configures RS256 and ES256 public-key verification.
 - `initJwtScopeClaim` maps JWT claim values into `prefix:value` scopes.
@@ -843,9 +873,9 @@ Configured claim-scope mappings add their values to `claims.scopes`, so existing
 `requiredScopes` checks can authorize external JWT claims.
 
 Use stable `kid` values and rotate verifier keys by adding new keys, then
-removing retired keys after issued tokens expire. For locally minted HS256
-tokens, rotate by adding new keys, changing `activeKid`, then removing retired
-keys after issued tokens expire.
+removing retired keys after issued tokens expire. For locally minted HS256,
+RS256, and ES256 tokens, rotate by adding new signing keys, changing
+`activeKid`, then removing retired keys after issued tokens expire.
 
 JWKS loading supports `RS256` RSA keys and `ES256` P-256 keys. Symmetric JWKS
 entries are ignored because they cannot be verified with public-key material.

@@ -15,6 +15,7 @@ type
   SigningKey* = object
     kid*: string
     secret*: string
+    privateKey: string
     publicKey*: string
     algorithm*: BearerTokenAlgorithm
 
@@ -28,6 +29,7 @@ type
     activeKid*: string
     keys*: Table[string, string]
     keyAlgorithms*: Table[string, BearerTokenAlgorithm]
+    signingKeys: Table[string, string]
 
   JwtVerifierConfig* = object
     issuer: string
@@ -82,6 +84,7 @@ type
 
   JwtJwksCache = ref object
     lock: Lock
+    refreshLock: Lock
     url: string
     cacheMaxAgeSeconds: int64
     unknownKidRefreshCooldownSeconds: int64
@@ -142,6 +145,20 @@ proc initPublicSigningKey*(
   if algorithm == bearerTokenHS256:
     raise newException(ValueError, "public signing keys must use RS256 or ES256")
   SigningKey(kid: kid, publicKey: publicKey, algorithm: algorithm)
+
+proc initPrivateSigningKey*(
+    kid: string, privateKey: string, publicKey: string, algorithm: BearerTokenAlgorithm
+): SigningKey =
+  ## Builds an asymmetric signing key with matching public verifier material.
+  if algorithm == bearerTokenHS256:
+    raise newException(ValueError, "private signing keys must use RS256 or ES256")
+  if privateKey.strip().len == 0:
+    raise newException(ValueError, "private signing key material must not be empty")
+  if publicKey.strip().len == 0:
+    raise newException(ValueError, "public signing key material must not be empty")
+  SigningKey(
+    kid: kid, privateKey: privateKey, publicKey: publicKey, algorithm: algorithm
+  )
 
 proc scopePart(raw: string, name: string): string =
   result = raw.strip()
@@ -236,6 +253,13 @@ proc keyMaterial(key: SigningKey): string =
   of bearerTokenRS256, bearerTokenES256:
     key.publicKey.strip()
 
+proc signingMaterial(key: SigningKey): string =
+  case key.algorithm
+  of bearerTokenHS256:
+    key.secret.strip()
+  of bearerTokenRS256, bearerTokenES256:
+    key.privateKey.strip()
+
 proc addVerifierKey(config: var JwtVerifierConfig, key: SigningKey) =
   let kid = key.kid.strip()
   let material = key.keyMaterial()
@@ -247,6 +271,13 @@ proc addVerifierKey(config: var JwtVerifierConfig, key: SigningKey) =
     raise newException(ValueError, "duplicate signing key id: " & kid)
   config.keys[kid] = material
   config.keyAlgorithms[kid] = key.algorithm
+
+proc addSigningKey(config: var BearerTokenConfig, key: SigningKey) =
+  let kid = key.kid.strip()
+  let material = key.signingMaterial()
+  if kid.len == 0 or material.len == 0:
+    return
+  config.signingKeys[kid] = material
 
 proc normalizeScopeClaims(scopeClaims: openArray[JwtScopeClaim]): seq[JwtScopeClaim] =
   for scopeClaim in scopeClaims:
@@ -274,6 +305,7 @@ proc initJwksCache(
 
   new(result)
   initLock(result.lock)
+  initLock(result.refreshLock)
   result.url = trimmedUrl
   result.cacheMaxAgeSeconds = int64(cacheMaxAgeSeconds)
   result.unknownKidRefreshCooldownSeconds = int64(unknownKidRefreshCooldownSeconds)
@@ -553,6 +585,9 @@ proc initBearerTokenConfig*(
   result.audience = verifier.audience
   result.keys = verifier.keys
   result.keyAlgorithms = verifier.keyAlgorithms
+  result.signingKeys = initTable[string, string]()
+  for key in keys:
+    result.addSigningKey(key)
 
   result.activeKid =
     if activeKid.strip().len > 0:
@@ -824,29 +859,33 @@ proc shouldRefreshUnknownKid(cache: JwtJwksCache, now: int64): bool =
     if result:
       cache.lastUnknownKidRefreshAt = now
 
-proc refreshJwksCache(cache: JwtJwksCache, now: int64): bool {.gcsafe.} =
+proc refreshJwksCache(cache: JwtJwksCache, now: int64, force = false): bool {.gcsafe.} =
   if cache.isNil:
     return true
-  try:
-    let keySet = verifierKeysFromJwks(cache.fetcher(cache.url))
-    cache.loadJwks(keySet, now)
-    var cacheMaxAgeSeconds: int64
-    withLock cache.lock:
-      cacheMaxAgeSeconds = cache.cacheMaxAgeSeconds
-    debug "jwks refreshed",
-      jwksUrl = cache.url,
-      keyCount = keySet.keys.len,
-      cacheMaxAgeSeconds = cacheMaxAgeSeconds
-    true
-  except CatchableError as e:
-    notice "jwks refresh failed", jwksUrl = cache.url, message = e.msg
-    false
+  withLock cache.refreshLock:
+    if not force and not cache.jwksNeedsRefresh(now):
+      result = true
+    else:
+      try:
+        let keySet = verifierKeysFromJwks(cache.fetcher(cache.url))
+        cache.loadJwks(keySet, now)
+        var cacheMaxAgeSeconds: int64
+        withLock cache.lock:
+          cacheMaxAgeSeconds = cache.cacheMaxAgeSeconds
+        debug "jwks refreshed",
+          jwksUrl = cache.url,
+          keyCount = keySet.keys.len,
+          cacheMaxAgeSeconds = cacheMaxAgeSeconds
+        result = true
+      except CatchableError as e:
+        notice "jwks refresh failed", jwksUrl = cache.url, message = e.msg
+        result = false
 
 proc refreshJwks*(config: JwtVerifierConfig, now = nowUnix()): bool {.gcsafe.} =
   ## Refreshes a configured JWKS cache immediately.
   if config.jwks.isNil:
     raise newException(ValueError, "JwtVerifierConfig has no JWKS URL")
-  config.jwks.refreshJwksCache(now)
+  config.jwks.refreshJwksCache(now, force = true)
 
 proc effectiveVerifierKeys(config: JwtVerifierConfig): VerifierKeySet {.gcsafe.} =
   result.keys = config.keys
@@ -861,7 +900,7 @@ proc effectiveVerifierKeys(config: JwtVerifierConfig): VerifierKeySet {.gcsafe.}
         result.keyAlgorithms[kid] = config.jwks.keyAlgorithms[kid]
 
 proc effectiveVerifierKeys(
-    config: JwtVerifierConfig, token: string, now: int64
+    config: JwtVerifierConfig, header: TokenHeader, now: int64
 ): VerifierKeySet {.gcsafe.} =
   if config.jwks.isNil:
     return config.effectiveVerifierKeys()
@@ -872,17 +911,22 @@ proc effectiveVerifierKeys(
     discard config.jwks.refreshJwksCache(now)
 
   result = config.effectiveVerifierKeys()
-  try:
-    let header = parseTokenHeader(token.strip(), "")
-    if header.kid.len > 0 and header.kid notin result.keys and not attemptedRefresh:
-      if config.jwks.shouldRefreshUnknownKid(now):
-        discard config.jwks.refreshJwksCache(now)
-        result = config.effectiveVerifierKeys()
-  except CatchableError:
-    discard
+  if header.kid.len > 0 and header.kid notin result.keys and not attemptedRefresh:
+    if config.jwks.shouldRefreshUnknownKid(now):
+      discard config.jwks.refreshJwksCache(now, force = true)
+      result = config.effectiveVerifierKeys()
 
 proc hmacSha256(message: string, secret: string): seq[byte] =
   signString(message, secret, HS256)
+
+proc signBearerToken(
+    signingInput: string, key: string, algorithm: BearerTokenAlgorithm
+): seq[byte] =
+  case algorithm
+  of bearerTokenHS256:
+    hmacSha256(signingInput, key)
+  of bearerTokenRS256, bearerTokenES256:
+    signString(signingInput, key, algorithm.toJwtAlgorithm())
 
 proc looksLikePemKey(value: string): bool =
   let normalized = value.strip().toUpperAscii()
@@ -903,6 +947,19 @@ proc keyAlgorithm(
     config: BearerTokenConfig, kid: string
 ): Option[BearerTokenAlgorithm] =
   keyAlgorithm(config.keys, config.keyAlgorithms, kid)
+
+proc signingKeyMaterial(
+    config: BearerTokenConfig, kid: string, algorithm: BearerTokenAlgorithm
+): Option[string] =
+  if kid in config.signingKeys:
+    let material = config.signingKeys[kid].strip()
+    if material.len > 0:
+      return some(material)
+  if algorithm == bearerTokenHS256 and kid in config.keys:
+    let material = config.keys[kid].strip()
+    if material.len > 0:
+      return some(material)
+  none(string)
 
 proc constantTimeEquals(lhs: string, rhs: string): bool =
   var diff = lhs.len xor rhs.len
@@ -1077,8 +1134,12 @@ proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string 
   if config.activeKid.len == 0 or config.activeKid notin config.keys:
     raise newException(ValueError, "activeKid does not reference a configured key")
   let activeAlgorithm = config.keyAlgorithm(config.activeKid)
-  if activeAlgorithm.isNone() or activeAlgorithm.get() != bearerTokenHS256:
-    raise newException(ValueError, "activeKid must reference an HS256 signing key")
+  if activeAlgorithm.isNone():
+    raise newException(ValueError, "activeKid key algorithm is not configured")
+  let signingMaterial =
+    config.signingKeyMaterial(config.activeKid, activeAlgorithm.get())
+  if signingMaterial.isNone():
+    raise newException(ValueError, "activeKid does not reference signing key material")
   if spec.subject.strip().len == 0:
     raise newException(ValueError, "subject must not be empty")
   if spec.expiresAt <= spec.notBefore:
@@ -1086,7 +1147,9 @@ proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string 
 
   let headerJson =
     %*{
-      "alg": tokenAlgorithmName(bearerTokenHS256), "typ": "JWT", "kid": config.activeKid
+      "alg": tokenAlgorithmName(activeAlgorithm.get()),
+      "typ": "JWT",
+      "kid": config.activeKid,
     }
 
   var claimsJson =
@@ -1105,7 +1168,8 @@ proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string 
   let headerPart = base64UrlEncode($headerJson)
   let claimsPart = base64UrlEncode($claimsJson)
   let signingInput = headerPart & "." & claimsPart
-  let signature = hmacSha256(signingInput, config.keys[config.activeKid])
+  let signature =
+    signBearerToken(signingInput, signingMaterial.get(), activeAlgorithm.get())
   let signaturePart = base64UrlEncodeBytes(signature)
 
   info "bearer token minted",
@@ -1228,10 +1292,26 @@ proc validateBearerToken*(
     requiredScopes: openArray[string] = [],
     now = nowUnix(),
 ): TokenValidationResult {.gcsafe.} =
-  let verifierKeys = config.effectiveVerifierKeys(token, now)
+  let trimmedToken = token.strip()
+  if trimmedToken.len == 0:
+    return failure(401, "missing_token", "Missing bearer token")
+
+  let tokenParts = trimmedToken.split('.')
+  if tokenParts.len != 3:
+    return failure(401, "invalid_token", "Malformed bearer token")
+
+  let header =
+    try:
+      parseTokenHeader(trimmedToken, "")
+    except CatchableError as e:
+      return failure(401, "invalid_token", e.msg)
+  if header.kid.len == 0:
+    return failure(401, "invalid_token", "Token key id is missing")
+
+  let verifierKeys = config.effectiveVerifierKeys(header, now)
   validateBearerTokenInternal(
     config.issuer, config.audience, verifierKeys.keys, verifierKeys.keyAlgorithms,
-    config.scopeClaims, "", token, requiredScopes, now,
+    config.scopeClaims, "", trimmedToken, requiredScopes, now,
   )
 
 proc validateBearerToken*(

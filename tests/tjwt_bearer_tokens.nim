@@ -1,4 +1,4 @@
-import std/[base64, json, strutils, tables, unittest]
+import std/[base64, json, locks, os, strutils, tables, unittest]
 
 import jwt
 import sarcophagus/core/jwt_bearer_tokens
@@ -87,6 +87,14 @@ proc base64UrlEncodeBytesTest(bytes: openArray[byte]): string =
     raw[idx] = char(value)
   base64UrlEncodeTest(raw)
 
+proc base64UrlDecodeTest(input: string): string =
+  var normalized = input
+  normalized = normalized.replace('-', '+')
+  normalized = normalized.replace('_', '/')
+  while normalized.len mod 4 != 0:
+    normalized.add('=')
+  decode(normalized)
+
 proc testSignatureAlgorithm(algorithm: string): SignatureAlgorithm =
   case algorithm
   of "HS256":
@@ -115,6 +123,53 @@ proc signedExternalToken(algorithm, kid, privateKey: string): string =
 
 proc tokenWithHeader(header: JsonNode): string =
   base64UrlEncodeTest($header) & ".not-json.signature"
+
+const singleFlightThreadCount = 4
+
+type
+  JwksSingleFlightState = object
+    lock: Lock
+    readyCount: int
+    released: bool
+    fetchCount: int
+    successCount: int
+
+  JwksSingleFlightArgs = object
+    state: ptr JwksSingleFlightState
+    verifier: JwtVerifierConfig
+    token: string
+    now: int64
+
+proc waitForSingleFlightRelease(args: JwksSingleFlightArgs) {.gcsafe.} =
+  withLock args.state.lock:
+    inc args.state.readyCount
+
+  while true:
+    var released = false
+    withLock args.state.lock:
+      released = args.state.released
+    if released:
+      return
+    sleep(1)
+
+proc validateSingleFlightToken(args: JwksSingleFlightArgs) {.thread.} =
+  waitForSingleFlightRelease(args)
+  let validation = validateBearerToken(args.verifier, args.token, now = args.now)
+  if validation.ok:
+    withLock args.state.lock:
+      inc args.state.successCount
+
+proc releaseSingleFlightThreads(state: var JwksSingleFlightState) =
+  for _ in 0 ..< 2_000:
+    var ready = false
+    withLock state.lock:
+      ready = state.readyCount >= singleFlightThreadCount
+      if ready:
+        state.released = true
+    if ready:
+      return
+    sleep(1)
+  doAssert false, "single-flight worker threads did not start"
 
 proc rsaJwk(kid: string): JsonNode =
   %*{
@@ -177,6 +232,88 @@ suite "bearer token core":
     check validation.claims.notBefore == 1_700_000_000
     check validation.claims.expiresAt == 1_700_000_600
     check validation.claims.scopes == @["sync:read", "sync:write"]
+
+  test "mints and validates RS256 bearer tokens with private signing keys":
+    let signingKey =
+      initPrivateSigningKey("rsa-1", rsPrivateKey, rsPublicKey, bearerTokenRS256)
+    let config = initBearerTokenConfig(
+      issuer = "sam-sync-server", audience = "sam-sync-api", keys = [signingKey]
+    )
+    check config.keys["rsa-1"] == rsPublicKey
+    check config.keys["rsa-1"] != rsPrivateKey
+
+    let token = mintBearerToken(
+      config,
+      initBearerTokenSpec(
+        subject = "client-1",
+        scopes = ["sync:read"],
+        ttlSeconds = 600,
+        issuedAt = 1_700_000_000,
+      ),
+    )
+    let header = parseJson(base64UrlDecodeTest(token.split('.')[0]))
+    check header["alg"].getStr() == "RS256"
+    check header["kid"].getStr() == "rsa-1"
+
+    let localValidation =
+      validateBearerToken(config, token, ["sync:read"], now = 1_700_000_010)
+    check localValidation.ok
+    check localValidation.claims.keyId == "rsa-1"
+
+    let verifier = initJwtVerifierConfig(
+      issuer = "sam-sync-server",
+      audience = "sam-sync-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+    let verifierValidation =
+      validateBearerToken(verifier, token, ["sync:read"], now = 1_700_000_010)
+    check verifierValidation.ok
+    check verifierValidation.claims.subject == "client-1"
+
+  test "mints and validates ES256 bearer tokens with private signing keys":
+    let signingKey =
+      initPrivateSigningKey("ec-1", ec256PrivateKey, ec256PublicKey, bearerTokenES256)
+    let config = initBearerTokenConfig(
+      issuer = "sam-sync-server", audience = "sam-sync-api", keys = [signingKey]
+    )
+    check config.keys["ec-1"] == ec256PublicKey
+    check config.keys["ec-1"] != ec256PrivateKey
+
+    let token = mintBearerToken(
+      config,
+      initBearerTokenSpec(
+        subject = "client-1",
+        scopes = ["sync:read"],
+        ttlSeconds = 600,
+        issuedAt = 1_700_000_000,
+      ),
+    )
+    let header = parseJson(base64UrlDecodeTest(token.split('.')[0]))
+    check header["alg"].getStr() == "ES256"
+    check header["kid"].getStr() == "ec-1"
+
+    let localValidation =
+      validateBearerToken(config, token, ["sync:read"], now = 1_700_000_010)
+    check localValidation.ok
+    check localValidation.claims.keyId == "ec-1"
+
+    let verifier = initJwtVerifierConfig(
+      issuer = "sam-sync-server",
+      audience = "sam-sync-api",
+      keys = [initPublicSigningKey("ec-1", ec256PublicKey, bearerTokenES256)],
+    )
+    let verifierValidation =
+      validateBearerToken(verifier, token, ["sync:read"], now = 1_700_000_010)
+    check verifierValidation.ok
+    check verifierValidation.claims.subject == "client-1"
+
+  test "private signing key constructor rejects invalid key material":
+    expect ValueError:
+      discard initPrivateSigningKey("v1", "secret", "secret", bearerTokenHS256)
+    expect ValueError:
+      discard initPrivateSigningKey("rsa-1", "", rsPublicKey, bearerTokenRS256)
+    expect ValueError:
+      discard initPrivateSigningKey("rsa-1", rsPrivateKey, "", bearerTokenRS256)
 
   test "validates RS256 tokens with a public key":
     let config = initBearerTokenConfig(
@@ -391,6 +528,78 @@ suite "bearer token core":
     check staleValidation.ok
     check fetchCount == 4
     check verifier.jwksFetchedAt == 1_700_000_088
+
+  test "jwks verifier rejects malformed tokens without fetching":
+    var fetchCount = 0
+    let fetcher: JwksFetcher = proc(url: string): string =
+      check url == "https://issuer.example/.well-known/jwks.json"
+      inc fetchCount
+      jwksDocument([rsaJwk("rsa-1")])
+
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      jwksUrl = "https://issuer.example/.well-known/jwks.json",
+      jwksCacheMaxAgeSeconds = 10,
+      jwksFetcher = fetcher,
+    )
+
+    let missing = validateBearerToken(verifier, "", now = 1_700_000_010)
+    check not missing.ok
+    check missing.failure.code == "missing_token"
+
+    let malformed = validateBearerToken(verifier, "not-a-jwt", now = 1_700_000_010)
+    check not malformed.ok
+    check malformed.failure.message == "Malformed bearer token"
+
+    let invalidHeader = validateBearerToken(
+      verifier,
+      tokenWithHeader(%*{"alg": "none", "typ": "JWT", "kid": "rsa-1"}),
+      now = 1_700_000_010,
+    )
+    check not invalidHeader.ok
+    check invalidHeader.failure.message == "token algorithm is not allowed"
+    check fetchCount == 0
+
+  test "stale jwks refresh is single-flight across concurrent validations":
+    var state: JwksSingleFlightState
+    initLock(state.lock)
+    defer:
+      deinitLock(state.lock)
+
+    let fetcher: JwksFetcher = proc(url: string): string =
+      doAssert url == "https://issuer.example/.well-known/jwks.json"
+      withLock state.lock:
+        inc state.fetchCount
+      sleep(100)
+      jwksDocument([rsaJwk("rsa-1")])
+
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      jwksUrl = "https://issuer.example/.well-known/jwks.json",
+      jwksCacheMaxAgeSeconds = 10,
+      jwksFetcher = fetcher,
+    )
+    let token = signedExternalToken("RS256", "rsa-1", rsPrivateKey)
+    check validateBearerToken(verifier, token, now = 1_700_000_010).ok
+    withLock state.lock:
+      check state.fetchCount == 1
+
+    var threads: array[singleFlightThreadCount, Thread[JwksSingleFlightArgs]]
+    for idx in 0 ..< singleFlightThreadCount:
+      let args = JwksSingleFlightArgs(
+        state: addr state, verifier: verifier, token: token, now: 1_700_000_021
+      )
+      createThread(threads[idx], validateSingleFlightToken, args)
+
+    releaseSingleFlightThreads(state)
+    joinThreads(threads)
+
+    withLock state.lock:
+      check state.successCount == singleFlightThreadCount
+      check state.fetchCount == 2
+    check verifier.jwksFetchedAt == 1_700_000_021
 
   test "jwks unknown kid cooldown can be disabled":
     var fetchCount = 0
@@ -771,7 +980,7 @@ suite "bearer token core":
     check validation.claims.subject == "client-1"
     check validation.claims.keyId == "v1"
 
-  test "minting requires an HS256 active signing key":
+  test "minting requires active signing key material":
     let config = initBearerTokenConfig(
       issuer = "external-issuer",
       audience = "external-api",

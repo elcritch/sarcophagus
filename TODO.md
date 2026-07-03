@@ -24,7 +24,7 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
 - [x] Document the fallback path for legacy Supabase `HS256` projects, where
   public-key verification is not possible and callers must either use the
   shared secret locally or call Supabase Auth to verify the token.
-- [ ] Add optional `RS256` and `ES256` bearer-token minting support using
+- [x] Add optional `RS256` and `ES256` bearer-token minting support using
   private signing keys, while keeping `JwtVerifierConfig` validation-only.
 
 ## High Value
