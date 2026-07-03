@@ -33,6 +33,22 @@ proc secureRequestHandler*(
         path = request.path,
         requiredScopeCount = scopes.len
       wrapped(request)
+  of apiSecurityJwtBearer:
+    let config = security.jwtConfig
+    let scopes = security.requiredScopes
+    let realm = security.realm
+    return proc(request: Request) {.gcsafe.} =
+      trace "enforcing tapis external jwt security",
+        httpMethod = request.httpMethod,
+        path = request.path,
+        requiredScopeCount = scopes.len
+      if not requireOAuth2BearerAuth(request, config, scopes, realm = realm):
+        return
+      debug "tapis external jwt security passed",
+        httpMethod = request.httpMethod,
+        path = request.path,
+        requiredScopeCount = scopes.len
+      wrapped(request)
 
 const scopedSecurityRouteNames =
   ["add", "get", "head", "post", "put", "delete", "options", "patch"]

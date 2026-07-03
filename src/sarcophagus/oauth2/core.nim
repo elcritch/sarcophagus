@@ -1077,3 +1077,84 @@ proc validateOAuth2BearerToken*(
         errorDescription = validation.failure.message,
       ),
     )
+
+proc oauth2ResourceResultFromBearerValidation(
+    validation: TokenValidationResult, realm: string, requiredScopes: openArray[string]
+): OAuth2ResourceResult =
+  if validation.ok:
+    return resourceSuccess(validation.claims)
+
+  case validation.failure.code
+  of "insufficient_scope":
+    let scope = scopeListToString(requiredScopes)
+    resourceFailure(
+      403,
+      "insufficient_scope",
+      validation.failure.message,
+      buildChallenge(
+        "Bearer",
+        realm,
+        error = "insufficient_scope",
+        errorDescription = validation.failure.message,
+        scope = scope,
+      ),
+    )
+  of "missing_token":
+    resourceFailure(401, "", "", buildChallenge("Bearer", realm))
+  else:
+    resourceFailure(
+      401,
+      "invalid_token",
+      validation.failure.message,
+      buildChallenge(
+        "Bearer",
+        realm,
+        error = "invalid_token",
+        errorDescription = validation.failure.message,
+      ),
+    )
+
+proc validateOAuth2BearerToken*(
+    config: JwtVerifierConfig,
+    authorizationHeader: string,
+    requiredScopes: openArray[string] = [],
+    realm = "",
+    now = nowUnix(),
+): OAuth2ResourceResult =
+  ## Validates an externally issued JWT from an `Authorization: Bearer` header.
+  ##
+  ## This overload keeps OAuth2 resource-server response semantics for raw
+  ## Mummy wrappers while using a validation-only `JwtVerifierConfig`.
+  let effectiveRealm =
+    if realm.strip().len > 0:
+      realm.strip()
+    else:
+      config.audience
+
+  trace "validating external jwt bearer token",
+    authorizationHeaderPresent = authorizationHeader.strip().len > 0,
+    requiredScopeCount = requiredScopes.len,
+    realm = effectiveRealm
+  let parsedAuth = parseAuthorizationHeader(authorizationHeader)
+  if not parsedAuth.present:
+    return resourceFailure(401, "", "", buildChallenge("Bearer", effectiveRealm))
+  if parsedAuth.malformed:
+    return resourceFailure(
+      400,
+      "invalid_request",
+      "The Authorization header is malformed",
+      buildChallenge(
+        "Bearer",
+        effectiveRealm,
+        error = "invalid_request",
+        errorDescription = "The Authorization header is malformed",
+      ),
+    )
+  if parsedAuth.scheme != "bearer":
+    return resourceFailure(401, "", "", buildChallenge("Bearer", effectiveRealm))
+
+  oauth2ResourceResultFromBearerValidation(
+    validateBearerToken(config, parsedAuth.credentials, requiredScopes, now = now),
+    effectiveRealm,
+    requiredScopes,
+  )

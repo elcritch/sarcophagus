@@ -79,6 +79,34 @@ proc validateBearerRequest*(
       message = result.failure.message,
       requiredScopeCount = requiredScopes.len
 
+proc validateBearerRequest*(
+    request: Request, config: JwtVerifierConfig, requiredScopes: openArray[string] = []
+): TokenValidationResult {.gcsafe.} =
+  ## Validates the request's external `Authorization: Bearer ...` JWT.
+  ##
+  ## `requiredScopes` must all be present in the token for validation to pass.
+  trace "validating external jwt bearer request",
+    httpMethod = request.httpMethod,
+    path = request.path,
+    authorizationHeaderPresent = request.headers["Authorization"].strip().len > 0,
+    requiredScopeCount = requiredScopes.len
+  let token = bearerTokenFromAuthorizationHeader(request.headers["Authorization"])
+  result = validateBearerToken(config, token, requiredScopes)
+  if result.ok:
+    debug "external jwt bearer request authorized",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      subject = result.claims.subject,
+      scopeCount = result.claims.scopes.len
+  else:
+    notice "external jwt bearer request denied",
+      httpMethod = request.httpMethod,
+      path = request.path,
+      statusCode = result.failure.statusCode,
+      code = result.failure.code,
+      message = result.failure.message,
+      requiredScopeCount = requiredScopes.len
+
 proc requireBearerAuth*(
     request: Request,
     config: BearerTokenConfig,
@@ -86,6 +114,22 @@ proc requireBearerAuth*(
     onError: AuthErrorResponder = defaultAuthErrorResponder,
 ): bool {.gcsafe.} =
   ## Validates bearer auth and writes an error response on failure.
+  ##
+  ## Returns true when the request may continue to the protected handler.
+  let validation = validateBearerRequest(request, config, requiredScopes)
+  if validation.ok:
+    return true
+
+  request.respondTypedApiValue(onError(validation.failure))
+  false
+
+proc requireBearerAuth*(
+    request: Request,
+    config: JwtVerifierConfig,
+    requiredScopes: openArray[string] = [],
+    onError: AuthErrorResponder = defaultAuthErrorResponder,
+): bool {.gcsafe.} =
+  ## Validates external JWT bearer auth and writes an error response on failure.
   ##
   ## Returns true when the request may continue to the protected handler.
   let validation = validateBearerRequest(request, config, requiredScopes)
@@ -115,6 +159,34 @@ proc bearerTokAuth*(
     onError: AuthErrorResponder = defaultAuthErrorResponder,
 ): RequestHandler =
   ## Wraps a Mummy handler and passes validated token claims to it.
+  let scopes = @requiredScopes
+  return proc(request: Request) {.gcsafe.} =
+    let validation = validateBearerRequest(request, config, scopes)
+    if not validation.ok:
+      request.respondTypedApiValue(onError(validation.failure))
+      return
+    wrapped(request, validation.claims)
+
+proc bearerTokAuth*(
+    wrapped: RequestHandler,
+    config: JwtVerifierConfig,
+    requiredScopes: openArray[string],
+    onError: AuthErrorResponder = defaultAuthErrorResponder,
+): RequestHandler =
+  ## Wraps a plain Mummy handler with external JWT bearer-token authorization.
+  let scopes = @requiredScopes
+  return proc(request: Request) {.gcsafe.} =
+    if not requireBearerAuth(request, config, scopes, onError):
+      return
+    wrapped(request)
+
+proc bearerTokAuth*(
+    wrapped: AuthenticatedRequestHandler,
+    config: JwtVerifierConfig,
+    requiredScopes: openArray[string],
+    onError: AuthErrorResponder = defaultAuthErrorResponder,
+): RequestHandler =
+  ## Wraps a Mummy handler and passes validated external JWT claims to it.
   let scopes = @requiredScopes
   return proc(request: Request) {.gcsafe.} =
     let validation = validateBearerRequest(request, config, scopes)

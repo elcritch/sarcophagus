@@ -520,3 +520,76 @@ suite "mummy oauth2":
     )
     check claimsResponse.code.int == 200
     check parseJson(claimsResponse.body)["subject"].getStr() == "user-123"
+
+  test "external jwt verifier configs protect raw oauth2 mummy routes":
+    randomize()
+    let issuerConfig = initBearerTokenConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [SigningKey(kid: "v1", secret: "external-secret")],
+    )
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [SigningKey(kid: "v1", secret: "external-secret")],
+    )
+    let readToken = mintBearerToken(
+      issuerConfig,
+      initBearerTokenSpec(
+        subject = "external-client", scopes = ["sync:read"], ttlSeconds = 600
+      ),
+    )
+    let writeToken = mintBearerToken(
+      issuerConfig,
+      initBearerTokenSpec(
+        subject = "writer-client", scopes = ["sync:write"], ttlSeconds = 600
+      ),
+    )
+
+    var router: Router
+    withOAuth2(verifier, ["sync:read"]):
+      router.get("/macro/protected", okHandler)
+    router.get(
+      "/proc/claims", oauth2(claimsHandler, verifier, ["sync:read"], realm = "api")
+    )
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let baseUrl = "http://127.0.0.1:" & $portNumber
+    let unauthenticated = client.get(baseUrl & "/macro/protected")
+    check unauthenticated.code.int == 401
+    check unauthenticated.headers["WWW-Authenticate"] ==
+      """Bearer realm="external-api""""
+
+    let outOfScope = client.request(
+      baseUrl & "/macro/protected",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & writeToken}),
+    )
+    check outOfScope.code.int == 403
+    check parseJson(outOfScope.body)["error"]["error"].getStr() == "insufficient_scope"
+
+    let claimsResponse = client.request(
+      baseUrl & "/proc/claims",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & readToken}),
+    )
+    check claimsResponse.code.int == 200
+    let claimsBody = parseJson(claimsResponse.body)
+    check claimsBody["subject"].getStr() == "external-client"
+    check claimsBody["scopes"][0].getStr() == "sync:read"

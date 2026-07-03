@@ -10,7 +10,7 @@ type
     bearerTokenRS256
     bearerTokenES256
 
-  JwksFetcher* = proc(url: string): string
+  JwksFetcher* = proc(url: string): string {.closure, gcsafe.}
 
   SigningKey* = object
     kid*: string
@@ -107,7 +107,7 @@ const
   jwtVerifierDefaultJwksPath* = "/.well-known/jwks.json"
   neverFetchedJwksAt = int64.low
 
-proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader
+proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader {.gcsafe.}
 
 proc nowUnix*(): int64 {.inline.} =
   getTime().toUnix()
@@ -252,7 +252,7 @@ proc normalizeScopeClaims(scopeClaims: openArray[JwtScopeClaim]): seq[JwtScopeCl
   for scopeClaim in scopeClaims:
     result.add(initJwtScopeClaim(scopeClaim.claimName, scopeClaim.scopePrefix))
 
-proc defaultJwksFetcher(url: string): string =
+proc defaultJwksFetcher(url: string): string {.gcsafe.} =
   var client =
     newHttpClient(maxRedirects = 0, timeout = jwtVerifierDefaultJwksFetchTimeoutMs)
   try:
@@ -272,7 +272,6 @@ proc initJwksCache(
   if not trimmedUrl.startsWith("https://"):
     raise newException(ValueError, "jwksUrl must use https")
 
-  let effectiveFetcher = if fetcher.isNil: defaultJwksFetcher else: fetcher
   new(result)
   initLock(result.lock)
   result.url = trimmedUrl
@@ -282,7 +281,11 @@ proc initJwksCache(
   result.lastUnknownKidRefreshAt = neverFetchedJwksAt
   result.keys = initTable[string, string]()
   result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
-  result.fetcher = effectiveFetcher
+  if fetcher.isNil:
+    result.fetcher = proc(url: string): string {.gcsafe.} =
+      defaultJwksFetcher(url)
+  else:
+    result.fetcher = fetcher
 
 template warnJwtVerifierRemoteJwksWithoutSsl*(jwksUrl: static[string]) =
   ## Emits a compile-time warning for literal remote JWKS URLs without SSL.
@@ -821,7 +824,7 @@ proc shouldRefreshUnknownKid(cache: JwtJwksCache, now: int64): bool =
     if result:
       cache.lastUnknownKidRefreshAt = now
 
-proc refreshJwksCache(cache: JwtJwksCache, now: int64): bool =
+proc refreshJwksCache(cache: JwtJwksCache, now: int64): bool {.gcsafe.} =
   if cache.isNil:
     return true
   try:
@@ -839,13 +842,13 @@ proc refreshJwksCache(cache: JwtJwksCache, now: int64): bool =
     notice "jwks refresh failed", jwksUrl = cache.url, message = e.msg
     false
 
-proc refreshJwks*(config: JwtVerifierConfig, now = nowUnix()): bool =
+proc refreshJwks*(config: JwtVerifierConfig, now = nowUnix()): bool {.gcsafe.} =
   ## Refreshes a configured JWKS cache immediately.
   if config.jwks.isNil:
     raise newException(ValueError, "JwtVerifierConfig has no JWKS URL")
   config.jwks.refreshJwksCache(now)
 
-proc effectiveVerifierKeys(config: JwtVerifierConfig): VerifierKeySet =
+proc effectiveVerifierKeys(config: JwtVerifierConfig): VerifierKeySet {.gcsafe.} =
   result.keys = config.keys
   result.keyAlgorithms = config.keyAlgorithms
   if config.jwks.isNil:
@@ -859,7 +862,7 @@ proc effectiveVerifierKeys(config: JwtVerifierConfig): VerifierKeySet =
 
 proc effectiveVerifierKeys(
     config: JwtVerifierConfig, token: string, now: int64
-): VerifierKeySet =
+): VerifierKeySet {.gcsafe.} =
   if config.jwks.isNil:
     return config.effectiveVerifierKeys()
 
@@ -1026,7 +1029,7 @@ proc base64UrlDecodeBytes(input: string): seq[byte] =
   for idx, value in decoded:
     result[idx] = byte(value)
 
-proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader =
+proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader {.gcsafe.} =
   let parts = token.split('.')
   if parts.len != 3:
     raise newException(ValueError, "malformed bearer token")
@@ -1224,7 +1227,7 @@ proc validateBearerToken*(
     token: string,
     requiredScopes: openArray[string] = [],
     now = nowUnix(),
-): TokenValidationResult =
+): TokenValidationResult {.gcsafe.} =
   let verifierKeys = config.effectiveVerifierKeys(token, now)
   validateBearerTokenInternal(
     config.issuer, config.audience, verifierKeys.keys, verifierKeys.keyAlgorithms,

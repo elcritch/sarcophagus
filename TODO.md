@@ -19,9 +19,9 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
   that derives URLs from `https://<project-ref>.supabase.co/auth/v1`.
 - [x] Support claim-based authorization for Supabase tokens, including `role`,
   `client_id`, `user_id`, and optional custom scope claims.
-- [ ] Wire external JWT validation into raw Mummy wrappers and TAPIS security
+- [x] Wire external JWT validation into raw Mummy wrappers and TAPIS security
   metadata without breaking existing `oauth2(config, scopes)` behavior.
-- [ ] Document the fallback path for legacy Supabase `HS256` projects, where
+- [x] Document the fallback path for legacy Supabase `HS256` projects, where
   public-key verification is not possible and callers must either use the
   shared secret locally or call Supabase Auth to verify the token.
 - [ ] Add optional `RS256` and `ES256` bearer-token minting support using

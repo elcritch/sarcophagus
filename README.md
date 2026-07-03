@@ -354,6 +354,29 @@ The same security metadata is used twice: the runtime wrapper validates bearer
 tokens and the OpenAPI generator emits `components.securitySchemes` plus per-route
 `security` requirements.
 
+TAPIS can also enforce bearer JWTs issued by another provider, such as Supabase.
+Pass a validation-only `JwtVerifierConfig` to `oauth2(...)` or `jwtBearer(...)`.
+This does not mount a local OAuth2 token endpoint; it only validates incoming
+`Authorization: Bearer ...` tokens:
+
+```nim
+import sarcophagus/tapis
+import sarcophagus/security/supabase_jwt
+
+let supabaseAuth = oauth2(
+  initSupabaseJwtVerifierConfig("https://project-id.supabase.co"),
+  [claimScope("role", "authenticated")],
+  schemeName = "supabaseJwt",
+  realm = "reports-api",
+)
+
+api.get("/reports", listReports, security = supabaseAuth)
+```
+
+When the config is a `JwtVerifierConfig`, OpenAPI emits an HTTP bearer JWT
+scheme instead of an OAuth2 flow. The `requiredScopes` are still enforced at
+runtime by Sarcophagus.
+
 ## `sarcophagus/oauth2`
 
 For end-to-end operational guidance, including browser login and authorization
@@ -431,6 +454,34 @@ For non-TAPIS handlers, use the same names on a plain Mummy `Router`:
 - `requireOAuth2BearerAuth(request, config, scopes)` validates a request in place.
 - `oauth2(handler, config, scopes)` wraps a raw handler.
 - `withOAuth2(config, scopes):` rewrites raw Mummy route registrations in a block.
+
+The resource-server helpers also accept `JwtVerifierConfig` for external JWTs:
+
+```nim
+import mummy
+import mummy/routers
+import sarcophagus/oauth2
+import sarcophagus/security/supabase_jwt
+
+proc reportsHandler(request: Request) {.gcsafe.} =
+  request.respond(200, "ok")
+
+let verifier = initSupabaseJwtVerifierConfig("https://project-id.supabase.co")
+
+var router: Router
+router.get(
+  "/reports",
+  oauth2(
+    reportsHandler,
+    verifier,
+    [claimScope("role", "authenticated")],
+    realm = "reports-api",
+  ),
+)
+```
+
+Use `withOAuth2(verifier, scopes):` to protect a block of raw Mummy route
+registrations. The optional `realm` controls the `WWW-Authenticate` challenge.
 
 ## `sarcophagus/security/secret_hashing`
 
@@ -646,6 +697,90 @@ Supabase verifier configs map `role`, `client_id`, and `user_id` claims into
 authorization scopes by default, such as `role:authenticated`. Additional
 claims can be mapped with `extraScopeClaims`.
 
+### Using External JWTs On Routes
+
+Once you have a `JwtVerifierConfig`, use it anywhere Sarcophagus validates
+resource bearer tokens.
+
+For raw Mummy handlers that should return OAuth2/RFC 6750-style errors and
+`WWW-Authenticate` challenges, pass the verifier to `oauth2(...)`:
+
+```nim
+import mummy
+import mummy/routers
+import sarcophagus/oauth2
+import sarcophagus/security/supabase_jwt
+
+proc reportsHandler(request: Request) {.gcsafe.} =
+  request.respond(200, "ok")
+
+let verifier = initSupabaseJwtVerifierConfig("https://project-id.supabase.co")
+
+var router: Router
+router.get(
+  "/reports",
+  oauth2(
+    reportsHandler,
+    verifier,
+    [claimScope("role", "authenticated")],
+    realm = "reports-api",
+  ),
+)
+```
+
+For raw Mummy handlers that prefer Sarcophagus' simpler bearer-auth JSON error
+shape, use `bearerTokAuth(...)` instead:
+
+```nim
+import mummy
+import mummy/routers
+import sarcophagus/bearer_auth
+import sarcophagus/security/supabase_jwt
+
+proc reportsHandler(request: Request) {.gcsafe.} =
+  request.respond(200, "ok")
+
+let verifier = initSupabaseJwtVerifierConfig("https://project-id.supabase.co")
+
+var router: Router
+router.get(
+  "/reports",
+  bearerTokAuth(
+    reportsHandler,
+    verifier,
+    [claimScope("role", "authenticated")],
+  ),
+)
+```
+
+Use `withBearerTokAuth(verifier, scopes):` to protect a block of raw Mummy route
+registrations with the same external verifier.
+
+For TAPIS routes, pass the verifier to `oauth2(...)` or `jwtBearer(...)`:
+
+```nim
+import sarcophagus/tapis
+import sarcophagus/security/supabase_jwt
+
+let verifier = initSupabaseJwtVerifierConfig("https://project-id.supabase.co")
+
+api.get(
+  "/reports",
+  listReports,
+  security = oauth2(
+    verifier,
+    [claimScope("role", "authenticated")],
+    schemeName = "supabaseJwt",
+    realm = "reports-api",
+  ),
+)
+```
+
+`oauth2(OAuth2Config, scopes)` keeps the existing OAuth2 flow metadata.
+`oauth2(JwtVerifierConfig, scopes)` validates external bearer JWTs and emits
+OpenAPI HTTP bearer metadata instead. The route still enforces the required
+scopes at runtime.
+
 The difference is token structure, not trust level. OAuth-style tokens usually
 carry permissions in a `scope` claim, such as `"scope": "photos:read"`.
 Supabase also carries useful authorization facts in separate signed claims, such
@@ -718,6 +853,16 @@ The default network fetcher requires an `https://` JWKS URL, disables redirects,
 and uses a 5000 ms timeout. Literal remote JWKS URLs emit a compile-time warning
 when the module is built without `-d:ssl`; compile with `-d:ssl` for the default
 HTTPS fetcher or pass a custom `jwksFetcher` that verifies TLS.
+
+Legacy Supabase projects may still issue `HS256` access tokens signed with the
+project JWT secret. Those tokens cannot be verified from public JWKS material:
+`HS256` is symmetric, so the verifier needs the same secret that signed the
+token. Backend services can either validate those tokens locally with a
+server-only shared secret, or call Supabase Auth from the backend and trust that
+remote verification result. Do not ship the Supabase JWT secret to browsers,
+mobile apps, or other untrusted clients. For kidless legacy tokens, use
+`BearerTokenConfig` with the shared secret because its `activeKid` fallback can
+validate local HS256 tokens without a JWT header `kid`.
 
 ## Development
 

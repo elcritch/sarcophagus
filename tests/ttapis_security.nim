@@ -103,6 +103,20 @@ proc issueToken(config: OAuth2Config, scope: string): string =
   doAssert token.ok
   token.response.accessToken
 
+proc externalJwtIssuerConfig(): BearerTokenConfig =
+  initBearerTokenConfig(
+    issuer = "external-issuer",
+    audience = "external-api",
+    keys = [SigningKey(kid: "v1", secret: "external-secret")],
+  )
+
+proc externalJwtVerifierConfig(): JwtVerifierConfig =
+  initJwtVerifierConfig(
+    issuer = "external-issuer",
+    audience = "external-api",
+    keys = [SigningKey(kid: "v1", secret: "external-secret")],
+  )
+
 proc readItem(id: int, verbose: Option[bool]): ItemOut {.gcsafe.} =
   ItemOut(id: id, name: "secure-" & $id, verbose: verbose.get(false))
 
@@ -140,6 +154,20 @@ proc buildApi(config: OAuth2Config): ApiRouter =
     )
     withSecurity(api, writeSecurity):
       api.get("/write-scoped-items/@id", readItem, summary = "Read write scoped item")
+  api.mountOpenApi()
+  api
+
+proc buildExternalJwtApi(verifier: JwtVerifierConfig): ApiRouter =
+  let readSecurity =
+    oauth2(verifier, ["items:read"], schemeName = "externalJwt", realm = "external-api")
+  let api = initApiRouter("TAPIS External JWT Test API", "1.0.0")
+  api.get(
+    "/external-items/@id",
+    readItem,
+    summary = "Read external JWT item",
+    tags = ["items"],
+    security = readSecurity,
+  )
   api.mountOpenApi()
   api
 
@@ -283,6 +311,74 @@ suite "typed mummy tapis security":
         headers = newHttpHeaders({"Authorization": "Bearer " & writeToken}),
       )
       check authenticated.code.int == 200
+
+  test "protects typed routes with external jwt security":
+    randomize()
+    let issuerConfig = externalJwtIssuerConfig()
+    let verifier = externalJwtVerifierConfig()
+    let readToken = mintBearerToken(
+      issuerConfig,
+      initBearerTokenSpec(
+        subject = "external-client", scopes = ["items:read"], ttlSeconds = 600
+      ),
+    )
+    let writeToken = mintBearerToken(
+      issuerConfig,
+      initBearerTokenSpec(
+        subject = "writer-client", scopes = ["items:write"], ttlSeconds = 600
+      ),
+    )
+    let api = buildExternalJwtApi(verifier)
+    let server = newServer(api.router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let baseUrl = "http://127.0.0.1:" & $portNumber
+    let unauthenticated = client.get(baseUrl & "/external-items/14")
+    check unauthenticated.code.int == 401
+    check unauthenticated.headers["WWW-Authenticate"] ==
+      """Bearer realm="external-api""""
+
+    let outOfScope = client.request(
+      baseUrl & "/external-items/14",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & writeToken}),
+    )
+    check outOfScope.code.int == 403
+    check parseJson(outOfScope.body)["error"]["error"].getStr() == "insufficient_scope"
+
+    let authenticated = client.request(
+      baseUrl & "/external-items/14?verbose=true",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & readToken}),
+    )
+    check authenticated.code.int == 200
+    let body = parseJson(authenticated.body)
+    check body["id"].getInt() == 14
+    check body["verbose"].getBool() == true
+
+    let openApi = client.get(baseUrl & "/swagger.json")
+    check openApi.code.int == 200
+    let spec = parseJson(openApi.body)
+    let scheme = spec["components"]["securitySchemes"]["externalJwt"]
+    check scheme["type"].getStr() == "http"
+    check scheme["scheme"].getStr() == "bearer"
+    check scheme["bearerFormat"].getStr() == "JWT"
+    let operation = spec["paths"]["/external-items/{id}"]["get"]
+    check operation["security"][0]["externalJwt"].len == 0
 
   test "registers oauth2 token endpoint on typed api routers":
     withTestServer do(baseUrl: string, readToken, writeToken: string):
