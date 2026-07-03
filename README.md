@@ -359,6 +359,29 @@ The same security metadata is used twice: the runtime wrapper validates bearer
 tokens and the OpenAPI generator emits `components.securitySchemes` plus per-route
 `security` requirements.
 
+TAPIS can also enforce bearer JWTs issued by another provider, such as Supabase.
+Pass a validation-only `JwtVerifierConfig` to `oauth2(...)` or `jwtBearer(...)`.
+This does not mount a local OAuth2 token endpoint; it only validates incoming
+`Authorization: Bearer ...` tokens:
+
+```nim
+import sarcophagus/tapis
+import sarcophagus/security/supabase_jwt
+
+let supabaseAuth = oauth2(
+  initSupabaseJwtVerifierConfig("https://project-id.supabase.co"),
+  [claimScope("role", "authenticated")],
+  schemeName = "supabaseJwt",
+  realm = "reports-api",
+)
+
+api.get("/reports", listReports, security = supabaseAuth)
+```
+
+When the config is a `JwtVerifierConfig`, OpenAPI emits an HTTP bearer JWT
+scheme instead of an OAuth2 flow. The `requiredScopes` are still enforced at
+runtime by Sarcophagus.
+
 ## `sarcophagus/oauth2`
 
 For end-to-end operational guidance, including browser login and authorization
@@ -436,6 +459,34 @@ For non-TAPIS handlers, use the same names on a plain Mummy `Router`:
 - `requireOAuth2BearerAuth(request, config, scopes)` validates a request in place.
 - `oauth2(handler, config, scopes)` wraps a raw handler.
 - `withOAuth2(config, scopes):` rewrites raw Mummy route registrations in a block.
+
+The resource-server helpers also accept `JwtVerifierConfig` for external JWTs:
+
+```nim
+import mummy
+import mummy/routers
+import sarcophagus/oauth2
+import sarcophagus/security/supabase_jwt
+
+proc reportsHandler(request: Request) {.gcsafe.} =
+  request.respond(200, "ok")
+
+let verifier = initSupabaseJwtVerifierConfig("https://project-id.supabase.co")
+
+var router: Router
+router.get(
+  "/reports",
+  oauth2(
+    reportsHandler,
+    verifier,
+    [claimScope("role", "authenticated")],
+    realm = "reports-api",
+  ),
+)
+```
+
+Use `withOAuth2(verifier, scopes):` to protect a block of raw Mummy route
+registrations. The optional `realm` controls the `WWW-Authenticate` challenge.
 
 ## `sarcophagus/security/secret_hashing`
 
@@ -577,9 +628,9 @@ true for those legacy hashes so they can be rotated to the fast format.
 
 ## `sarcophagus/core/jwt_bearer_tokens`
 
-The bearer-token module mints and validates signed HS256 JWT bearer tokens. OAuth2
-uses this module internally, but it is also usable directly for service-to-service
-tokens.
+The bearer-token module mints signed HS256, RS256, and ES256 JWT bearer tokens
+and validates HS256, RS256, and ES256 bearer tokens. OAuth2 uses this module
+internally, but it is also usable directly for service-to-service tokens.
 
 ```nim
 let config = initBearerTokenConfig(
@@ -601,15 +652,276 @@ let validation = validateBearerToken(config, token, requiredScopes = ["jobs:read
 doAssert validation.ok
 ```
 
+For locally minted asymmetric tokens, pass a private signing key with its
+matching public verifier key. Sarcophagus stores the public key for validation
+and uses the private key only when minting from `BearerTokenConfig`.
+
+```nim
+let config = initBearerTokenConfig(
+  issuer = "example-server",
+  audience = "example-api",
+  keys = [
+    initPrivateSigningKey(
+      kid = "rsa-1",
+      privateKey = privateKeyPem,
+      publicKey = publicKeyPem,
+      algorithm = bearerTokenRS256,
+    )
+  ],
+)
+
+let token = mintBearerToken(
+  config,
+  initBearerTokenSpec(
+    subject = "worker-1",
+    scopes = ["jobs:read"],
+    ttlSeconds = 300,
+  ),
+)
+```
+
+If the key material lives in PEM files, use the file-loading helper. By default
+it rejects private-key files that are symlinks, empty, larger than 64 KiB, or
+group/world accessible on POSIX systems, and verifies that the private and
+public keys form a working pair for the selected algorithm.
+
+```nim
+let signingKey = initPrivateSigningKeyFromFiles(
+  kid = "rsa-1",
+  privateKeyPath = "/run/secrets/jwt_private.pem",
+  publicKeyPath = "/run/secrets/jwt_public.pem",
+  algorithm = bearerTokenRS256,
+)
+
+let config = initBearerTokenConfig(
+  issuer = "example-server",
+  audience = "example-api",
+  keys = [signingKey],
+)
+```
+
+For external tokens signed elsewhere, use a validation-only verifier config.
+Sarcophagus validates these tokens but does not mint them:
+
+```nim
+let externalVerifier = initJwtVerifierConfig(
+  issuer = "https://project.example/auth/v1",
+  audience = "authenticated",
+  keys = [
+    initPublicSigningKey(
+      kid = "key-id",
+      publicKey = publicKeyPem,
+      algorithm = bearerTokenRS256,
+    )
+  ],
+)
+
+let validation = validateBearerToken(externalVerifier, externalAccessToken)
+doAssert validation.ok
+```
+
+For providers that expose a JWKS endpoint, configure a verifier with a JWKS URL.
+The cache defaults to 600 seconds, matching Supabase's documented edge-cache
+window. Validation refreshes once early when a token uses an unknown `kid`, then
+rate-limits additional unknown-`kid` refresh attempts for 60 seconds by default.
+Provider integrations can be small modules built on the reusable URL derivation
+helpers. For example, `sarcophagus/security/supabase_jwt` provides Supabase
+defaults:
+
+```nim
+let supabaseVerifier = initSupabaseJwtVerifierConfig(
+  projectUrl = "https://project-id.supabase.co",
+  jwksUnknownKidRefreshCooldownSeconds = 60,
+  extraScopeClaims = [initJwtScopeClaim("permissions", "permission")],
+)
+
+let validation = validateBearerToken(
+  supabaseVerifier,
+  supabaseAccessToken,
+  requiredScopes = [
+    claimScope("role", "authenticated"),
+    claimScope("permission", "reports:read"),
+  ],
+)
+doAssert validation.ok
+```
+
+Supabase verifier configs map `role`, `client_id`, and `user_id` claims into
+authorization scopes by default, such as `role:authenticated`. Additional
+claims can be mapped with `extraScopeClaims`.
+
+### Using External JWTs On Routes
+
+Once you have a `JwtVerifierConfig`, use it anywhere Sarcophagus validates
+resource bearer tokens.
+
+For raw Mummy handlers that should return OAuth2/RFC 6750-style errors and
+`WWW-Authenticate` challenges, pass the verifier to `oauth2(...)`:
+
+```nim
+import mummy
+import mummy/routers
+import sarcophagus/oauth2
+import sarcophagus/security/supabase_jwt
+
+proc reportsHandler(request: Request) {.gcsafe.} =
+  request.respond(200, "ok")
+
+let verifier = initSupabaseJwtVerifierConfig("https://project-id.supabase.co")
+
+var router: Router
+router.get(
+  "/reports",
+  oauth2(
+    reportsHandler,
+    verifier,
+    [claimScope("role", "authenticated")],
+    realm = "reports-api",
+  ),
+)
+```
+
+For raw Mummy handlers that prefer Sarcophagus' simpler bearer-auth JSON error
+shape, use `bearerTokAuth(...)` instead:
+
+```nim
+import mummy
+import mummy/routers
+import sarcophagus/bearer_auth
+import sarcophagus/security/supabase_jwt
+
+proc reportsHandler(request: Request) {.gcsafe.} =
+  request.respond(200, "ok")
+
+let verifier = initSupabaseJwtVerifierConfig("https://project-id.supabase.co")
+
+var router: Router
+router.get(
+  "/reports",
+  bearerTokAuth(
+    reportsHandler,
+    verifier,
+    [claimScope("role", "authenticated")],
+  ),
+)
+```
+
+Use `withBearerTokAuth(verifier, scopes):` to protect a block of raw Mummy route
+registrations with the same external verifier.
+
+For TAPIS routes, pass the verifier to `oauth2(...)` or `jwtBearer(...)`:
+
+```nim
+import sarcophagus/tapis
+import sarcophagus/security/supabase_jwt
+
+let verifier = initSupabaseJwtVerifierConfig("https://project-id.supabase.co")
+
+api.get(
+  "/reports",
+  listReports,
+  security = oauth2(
+    verifier,
+    [claimScope("role", "authenticated")],
+    schemeName = "supabaseJwt",
+    realm = "reports-api",
+  ),
+)
+```
+
+`oauth2(OAuth2Config, scopes)` keeps the existing OAuth2 flow metadata.
+`oauth2(JwtVerifierConfig, scopes)` validates external bearer JWTs and emits
+OpenAPI HTTP bearer metadata instead. The route still enforces the required
+scopes at runtime.
+
+The difference is token structure, not trust level. OAuth-style tokens usually
+carry permissions in a `scope` claim, such as `"scope": "photos:read"`.
+Supabase also carries useful authorization facts in separate signed claims, such
+as `"role": "authenticated"` or `"user_id": "user-123"`. `claimScope` builds the
+matching `prefix:value` string for `requiredScopes`, so both forms are checked
+through the same scope authorization path after the JWT signature and standard
+claims have been verified.
+
+Custom provider modules can use the same core helpers:
+
+```nim
+let urls = deriveJwtVerifierUrls(
+  "https://auth.example.com",
+  initJwtVerifierUrlOptions(
+    issuerPath = "/tenant-a",
+    jwksPath = "/tenant-a/.well-known/jwks.json",
+    requiredHostSuffix = "example.com",
+  ),
+)
+
+let externalVerifier = initJwtVerifierConfig(
+  issuer = urls.issuer,
+  audience = "example-api",
+  jwksUrl = urls.jwksUrl,
+  scopeClaims = [initJwtScopeClaim("permissions", "permission")],
+)
+```
+
 Important helpers:
 
 - `parseScopeList` accepts space, comma, tab, and newline separated scopes.
 - `scopeListToString` normalizes scopes for token claims.
 - `hasAllScopes` checks whether a token satisfies required scopes.
 - `parseSigningKeys` parses `kid:secret,kid2:secret2` strings for configuration.
+- `initPrivateSigningKey` configures RS256 and ES256 private-key minting with
+  matching public-key verification.
+- `initPrivateSigningKeyFromFiles` loads RS256 and ES256 PEM keys from files,
+  checks the private-key file policy, and verifies the key pair before use.
+- `initPrivateSigningKeyFilePolicy` customizes the file helper's symlink,
+  owner-only permission, and max-size checks.
+- `initJwtVerifierConfig` configures validation-only JWT verification.
+- `initPublicSigningKey` configures RS256 and ES256 public-key verification.
+- `initJwtScopeClaim` maps JWT claim values into `prefix:value` scopes.
+- `claimScope` builds normalized required scopes for claim-based authorization.
+- `parseJwksSigningKeys` converts supported RSA and P-256 JWKS entries into
+  verifier keys.
+- `initJwtVerifierUrlOptions` configures generic provider URL derivation.
+- `deriveJwtVerifierUrls` derives issuer and JWKS URLs from provider base URLs.
+- `initSupabaseJwtVerifierConfig` in `sarcophagus/security/supabase_jwt`
+  configures validation for Supabase access tokens with audience
+  `authenticated` by default.
+- `refreshJwks` refreshes a configured JWKS cache explicitly.
 
-Use stable `kid` values and rotate by adding new keys, changing `activeKid`, then
-removing retired keys after issued tokens expire.
+`JwtVerifierConfig` exposes read-only issuer, audience, length, and key-id
+membership accessors, plus JWKS URL, fetch timestamp, and cache-age accessors.
+It does not expose configured key material.
+
+Validation checks JWT header `alg`, `kid`, and `typ` before claims are parsed or
+trusted. Unsupported algorithms, malformed key ids, unknown keys, and non-JWT
+types are rejected as invalid tokens.
+
+Validated claims include `iss`, `aud`, `sub`, `exp`, `iat`, optional
+`role`, `client_id`, `user_id`, and the header `kid`. The optional `nbf` claim
+is enforced when present, and otherwise defaults to `iat` in returned claims.
+Configured claim-scope mappings add their values to `claims.scopes`, so existing
+`requiredScopes` checks can authorize external JWT claims.
+
+Use stable `kid` values and rotate verifier keys by adding new keys, then
+removing retired keys after issued tokens expire. For locally minted HS256,
+RS256, and ES256 tokens, rotate by adding new signing keys, changing
+`activeKid`, then removing retired keys after issued tokens expire.
+
+JWKS loading supports `RS256` RSA keys and `ES256` P-256 keys. Symmetric JWKS
+entries are ignored because they cannot be verified with public-key material.
+The default network fetcher requires an `https://` JWKS URL, disables redirects,
+and uses a 5000 ms timeout. Literal remote JWKS URLs emit a compile-time warning
+when the module is built without `-d:ssl`; compile with `-d:ssl` for the default
+HTTPS fetcher or pass a custom `jwksFetcher` that verifies TLS.
+
+Legacy Supabase projects may still issue `HS256` access tokens signed with the
+project JWT secret. Those tokens cannot be verified from public JWKS material:
+`HS256` is symmetric, so the verifier needs the same secret that signed the
+token. Backend services can either validate those tokens locally with a
+server-only shared secret, or call Supabase Auth from the backend and trust that
+remote verification result. Do not ship the Supabase JWT secret to browsers,
+mobile apps, or other untrusted clients. For kidless legacy tokens, use
+`BearerTokenConfig` with the shared secret because its `activeKid` fallback can
+validate local HS256 tokens without a JWT header `kid`.
 
 ## Development
 

@@ -2,6 +2,7 @@ import std/[httpclient, json, options, random, strutils, unittest]
 
 import mummy
 
+import jwt_test_fixtures
 import sarcophagus/[core/jwt_bearer_tokens, oauth2/core, tapis]
 from sarcophagus/oauth2 import OAuth2User
 
@@ -140,6 +141,20 @@ proc buildApi(config: OAuth2Config): ApiRouter =
     )
     withSecurity(api, writeSecurity):
       api.get("/write-scoped-items/@id", readItem, summary = "Read write scoped item")
+  api.mountOpenApi()
+  api
+
+proc buildExternalJwtApi(verifier: JwtVerifierConfig): ApiRouter =
+  let readSecurity =
+    oauth2(verifier, ["items:read"], schemeName = "externalJwt", realm = "external-api")
+  let api = initApiRouter("TAPIS External JWT Test API", "1.0.0")
+  api.get(
+    "/external-items/@id",
+    readItem,
+    summary = "Read external JWT item",
+    tags = ["items"],
+    security = readSecurity,
+  )
   api.mountOpenApi()
   api
 
@@ -283,6 +298,91 @@ suite "typed mummy tapis security":
         headers = newHttpHeaders({"Authorization": "Bearer " & writeToken}),
       )
       check authenticated.code.int == 200
+
+  test "protects typed routes with external jwt security":
+    randomize()
+    var fetchCount = 0
+    let fetcher: JwksFetcher = proc(url: string): string =
+      check url == "https://issuer.example/.well-known/jwks.json"
+      inc fetchCount
+      if fetchCount == 1:
+        testJwksDocument([testRsaJwk("rsa-1")])
+      else:
+        testJwksDocument([testRsaJwk("rsa-1"), testRsaJwk("rsa-2")])
+    let verifier = initJwtVerifierConfig(
+      issuer = testJwtIssuer,
+      audience = testJwtAudience,
+      jwksUrl = "https://issuer.example/.well-known/jwks.json",
+      jwksCacheMaxAgeSeconds = 1,
+      jwksFetcher = fetcher,
+    )
+    let issuedAt = nowUnix()
+    let readToken =
+      signedTestRs256Jwt("rsa-1", "external-client", ["items:read"], issuedAt)
+    let writeToken =
+      signedTestRs256Jwt("rsa-2", "writer-client", ["items:write"], issuedAt)
+    let api = buildExternalJwtApi(verifier)
+    let server = newServer(api.router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let baseUrl = "http://127.0.0.1:" & $portNumber
+    let unauthenticated = client.get(baseUrl & "/external-items/14")
+    check unauthenticated.code.int == 401
+    check unauthenticated.headers["WWW-Authenticate"] ==
+      """Bearer realm="external-api""""
+    check fetchCount == 0
+
+    let malformed = client.request(
+      baseUrl & "/external-items/14",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer not-a-jwt"}),
+    )
+    check malformed.code.int == 401
+    check fetchCount == 0
+
+    let authenticated = client.request(
+      baseUrl & "/external-items/14?verbose=true",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & readToken}),
+    )
+    check authenticated.code.int == 200
+    let body = parseJson(authenticated.body)
+    check body["id"].getInt() == 14
+    check body["verbose"].getBool() == true
+    check fetchCount == 1
+
+    let outOfScope = client.request(
+      baseUrl & "/external-items/14",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & writeToken}),
+    )
+    check outOfScope.code.int == 403
+    check parseJson(outOfScope.body)["error"]["error"].getStr() == "insufficient_scope"
+    check fetchCount == 2
+
+    let openApi = client.get(baseUrl & "/swagger.json")
+    check openApi.code.int == 200
+    let spec = parseJson(openApi.body)
+    let scheme = spec["components"]["securitySchemes"]["externalJwt"]
+    check scheme["type"].getStr() == "http"
+    check scheme["scheme"].getStr() == "bearer"
+    check scheme["bearerFormat"].getStr() == "JWT"
+    let operation = spec["paths"]["/external-items/{id}"]["get"]
+    check operation["security"][0]["externalJwt"].len == 0
 
   test "registers oauth2 token endpoint on typed api routers":
     withTestServer do(baseUrl: string, readToken, writeToken: string):

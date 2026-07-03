@@ -1,27 +1,33 @@
-import std/json
+import std/[json, strutils]
 
+import ./jwt_bearer_tokens
 import ../oauth2/core
 
 type
   ApiSecurityKind* = enum
     apiSecurityNone
     apiSecurityOAuth2
+    apiSecurityJwtBearer
 
   OAuth2FlowKind* = enum
     oauth2FlowClientCredentials
     oauth2FlowAuthorizationCode
 
   ApiSecurity* = object
+    requiredScopes*: seq[string]
+    schemeName*: string
     case kind*: ApiSecurityKind
     of apiSecurityNone:
       discard
     of apiSecurityOAuth2:
       oauth2Config*: OAuth2Config
-      requiredScopes*: seq[string]
-      schemeName*: string
       tokenUrl*: string
       authorizationUrl*: string
       flowKind*: OAuth2FlowKind
+    of apiSecurityJwtBearer:
+      jwtConfig*: JwtVerifierConfig
+      bearerFormat*: string
+      realm*: string
 
 proc noSecurity*(): ApiSecurity =
   ApiSecurity(kind: apiSecurityNone)
@@ -43,6 +49,40 @@ proc oauth2*(
     authorizationUrl: authorizationUrl,
     flowKind: flowKind,
   )
+
+proc jwtBearer*(
+    config: JwtVerifierConfig,
+    requiredScopes: openArray[string] = [],
+    schemeName = "bearerAuth",
+    bearerFormat = "JWT",
+    realm = "",
+): ApiSecurity =
+  ## Describes and enforces externally issued JWT bearer-token security.
+  ##
+  ## OpenAPI metadata uses an HTTP bearer scheme. `requiredScopes` are still
+  ## enforced at runtime by Sarcophagus but are omitted from the OpenAPI
+  ## requirement because non-OAuth2 security schemes do not define scopes.
+  ApiSecurity(
+    kind: apiSecurityJwtBearer,
+    jwtConfig: config,
+    requiredScopes: @requiredScopes,
+    schemeName: schemeName,
+    bearerFormat: bearerFormat,
+    realm: realm,
+  )
+
+proc oauth2*(
+    config: JwtVerifierConfig,
+    requiredScopes: openArray[string] = [],
+    schemeName = "bearerAuth",
+    bearerFormat = "JWT",
+    realm = "",
+): ApiSecurity =
+  ## Compatibility constructor for APIs that use external OAuth2/JWT issuers.
+  ##
+  ## This overload validates bearer tokens with `JwtVerifierConfig` and emits
+  ## OpenAPI HTTP bearer metadata instead of an OAuth2 flow.
+  jwtBearer(config, requiredScopes, schemeName, bearerFormat, realm)
 
 proc oauth2*(
     config: OAuth2Config,
@@ -104,6 +144,10 @@ proc openApiSecurityRequirement*(security: ApiSecurity): JsonNode =
     var requirement = newJObject()
     requirement[security.schemeName] = %security.requiredScopes
     result.add requirement
+  of apiSecurityJwtBearer:
+    var requirement = newJObject()
+    requirement[security.schemeName] = newJArray()
+    result.add requirement
 
 proc addOAuth2Scopes(scopes: JsonNode, requiredScopes: openArray[string]) =
   for scope in requiredScopes:
@@ -145,3 +189,8 @@ proc addOpenApiSecuritySchemes*(components: JsonNode, security: ApiSecurity) =
 
     let scopes = flows[flowName]["scopes"]
     scopes.addOAuth2Scopes(security.requiredScopes)
+  of apiSecurityJwtBearer:
+    if security.schemeName notin securitySchemes:
+      securitySchemes[security.schemeName] = %*{"type": "http", "scheme": "bearer"}
+      if security.bearerFormat.strip().len > 0:
+        securitySchemes[security.schemeName]["bearerFormat"] = %security.bearerFormat

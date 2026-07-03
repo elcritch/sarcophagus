@@ -3,6 +3,7 @@ import std/[httpclient, json, random, unittest]
 import mummy
 import mummy/routers
 
+import jwt_test_fixtures
 import sarcophagus/[bearer_auth, core/jwt_bearer_tokens]
 
 type ServerThreadArgs = object
@@ -145,3 +146,149 @@ suite "mummy bearer auth":
     let body = parseJson(response.body)
     check body["status"].getStr() == "custom-error"
     check body["error"]["code"].getStr() == "missing_token"
+
+  test "external jwt verifier configs protect raw mummy routes":
+    randomize()
+    let issuerConfig = initBearerTokenConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [SigningKey(kid: "v1", secret: "external-secret")],
+    )
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [SigningKey(kid: "v1", secret: "external-secret")],
+    )
+    let readToken = mintBearerToken(
+      issuerConfig,
+      initBearerTokenSpec(
+        subject = "external-client", scopes = ["sync:read"], ttlSeconds = 600
+      ),
+    )
+    let writeToken = mintBearerToken(
+      issuerConfig,
+      initBearerTokenSpec(
+        subject = "writer-client", scopes = ["sync:write"], ttlSeconds = 600
+      ),
+    )
+
+    var router: Router
+    withBearerTokAuth(verifier, ["sync:read"]):
+      router.get("/macro/protected", okHandler)
+    router.get("/proc/claims", bearerTokAuth(claimsHandler, verifier, ["sync:read"]))
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let baseUrl = "http://127.0.0.1:" & $portNumber
+    let unauthenticated = client.get(baseUrl & "/macro/protected")
+    check unauthenticated.code.int == 401
+    check parseJson(unauthenticated.body)["error"]["code"].getStr() == "missing_token"
+
+    let outOfScope = client.request(
+      baseUrl & "/macro/protected",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & writeToken}),
+    )
+    check outOfScope.code.int == 403
+    check parseJson(outOfScope.body)["error"]["code"].getStr() == "insufficient_scope"
+
+    let claimsResponse = client.request(
+      baseUrl & "/proc/claims",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & readToken}),
+    )
+    check claimsResponse.code.int == 200
+    let claimsBody = parseJson(claimsResponse.body)
+    check claimsBody["subject"].getStr() == "external-client"
+    check claimsBody["scopes"][0].getStr() == "sync:read"
+
+  test "external jwt bearer auth uses jwks after cheap request rejection":
+    randomize()
+    var fetchCount = 0
+    let fetcher: JwksFetcher = proc(url: string): string =
+      check url == "https://issuer.example/.well-known/jwks.json"
+      inc fetchCount
+      if fetchCount == 1:
+        testJwksDocument([testRsaJwk("rsa-1")])
+      else:
+        testJwksDocument([testRsaJwk("rsa-1"), testRsaJwk("rsa-2")])
+    let verifier = initJwtVerifierConfig(
+      issuer = testJwtIssuer,
+      audience = testJwtAudience,
+      jwksUrl = "https://issuer.example/.well-known/jwks.json",
+      jwksCacheMaxAgeSeconds = 1,
+      jwksFetcher = fetcher,
+    )
+    let readToken =
+      signedTestRs256Jwt("rsa-1", "external-client", ["sync:read"], nowUnix())
+    let rotatedToken =
+      signedTestRs256Jwt("rsa-2", "rotated-client", ["sync:read"], nowUnix())
+
+    var router: Router
+    router.get("/claims", bearerTokAuth(claimsHandler, verifier, ["sync:read"]))
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let baseUrl = "http://127.0.0.1:" & $portNumber
+    let unauthenticated = client.get(baseUrl & "/claims")
+    check unauthenticated.code.int == 401
+    check fetchCount == 0
+
+    let malformed = client.request(
+      baseUrl & "/claims",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer not-a-jwt"}),
+    )
+    check malformed.code.int == 401
+    check fetchCount == 0
+
+    let claimsResponse = client.request(
+      baseUrl & "/claims",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & readToken}),
+    )
+    check claimsResponse.code.int == 200
+    let claimsBody = parseJson(claimsResponse.body)
+    check claimsBody["subject"].getStr() == "external-client"
+    check claimsBody["scopes"][0].getStr() == "sync:read"
+    check fetchCount == 1
+
+    let rotatedResponse = client.request(
+      baseUrl & "/claims",
+      httpMethod = HttpGet,
+      headers = newHttpHeaders({"Authorization": "Bearer " & rotatedToken}),
+    )
+    check rotatedResponse.code.int == 200
+    let rotatedBody = parseJson(rotatedResponse.body)
+    check rotatedBody["subject"].getStr() == "rotated-client"
+    check fetchCount == 2

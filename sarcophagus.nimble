@@ -1,4 +1,4 @@
-version       = "0.11.2"
+version       = "0.12.0"
 author        = "Jaremy Creechley"
 description   = "mummy higher level api wrapper"
 license       = "Apache-2.0"
@@ -15,7 +15,7 @@ feature "dev":
   requires "karax" # web examples
 
 feature "cbor":
-  requires "cborious"
+  requires "cborious >= 0.7.2"
 
 feature "jsony":
   requires "jsony"

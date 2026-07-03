@@ -1,18 +1,59 @@
-import std/[base64, json, options, sets, strutils, tables, times]
+import
+  std/[base64, httpclient, json, locks, options, os, sets, strutils, tables, times, uri]
 
 import jwt
 import chroniclers
 
 type
+  BearerTokenAlgorithm* = enum
+    bearerTokenHS256
+    bearerTokenRS256
+    bearerTokenES256
+
+  JwksFetcher* = proc(url: string): string {.closure, gcsafe.}
+
   SigningKey* = object
     kid*: string
     secret*: string
+    privateKey: string
+    publicKey*: string
+    algorithm*: BearerTokenAlgorithm
+
+  PrivateSigningKeyFilePolicy* = object
+    requireOwnerOnly*: bool
+    allowSymlink*: bool
+    maxBytes*: Natural
+
+  JwtScopeClaim* = object
+    claimName: string
+    scopePrefix: string
 
   BearerTokenConfig* = object
     issuer*: string
     audience*: string
     activeKid*: string
     keys*: Table[string, string]
+    keyAlgorithms*: Table[string, BearerTokenAlgorithm]
+    signingKeys: Table[string, string]
+
+  JwtVerifierConfig* = object
+    issuer: string
+    audience: string
+    keys: Table[string, string]
+    keyAlgorithms: Table[string, BearerTokenAlgorithm]
+    jwks: JwtJwksCache
+    scopeClaims: seq[JwtScopeClaim]
+
+  JwtVerifierUrls* = object
+    issuer*: string
+    jwksUrl*: string
+
+  JwtVerifierUrlOptions* = object
+    issuerPath: string
+    jwksPath: string
+    requiredHostSuffix: string
+    allowRootHost: bool
+    allowPort: bool
 
   BearerTokenSpec* = object
     subject*: string
@@ -27,6 +68,9 @@ type
     subject*: string
     audience*: string
     scopes*: seq[string]
+    role*: string
+    clientId*: string
+    userId*: string
     tokenId*: string
     keyId*: string
     issuedAt*: int64
@@ -43,8 +87,289 @@ type
     claims*: BearerTokenClaims
     failure*: TokenValidationFailure
 
+  JwtJwksCache = ref object
+    lock: Lock
+    refreshLock: Lock
+    url: string
+    cacheMaxAgeSeconds: int64
+    unknownKidRefreshCooldownSeconds: int64
+    fetchedAt: int64
+    lastUnknownKidRefreshAt: int64
+    keys: Table[string, string]
+    keyAlgorithms: Table[string, BearerTokenAlgorithm]
+    fetcher: JwksFetcher
+
+type
+  TokenHeader = object
+    algorithm: BearerTokenAlgorithm
+    kid: string
+
+  VerifierKeySet = object
+    keys: Table[string, string]
+    keyAlgorithms: Table[string, BearerTokenAlgorithm]
+
+const
+  privateSigningKeyFileDefaultMaxBytes* = 64 * 1024
+  defaultPrivateSigningKeyFilePolicy* = PrivateSigningKeyFilePolicy(
+    requireOwnerOnly: true,
+    allowSymlink: false,
+    maxBytes: privateSigningKeyFileDefaultMaxBytes,
+  )
+  jwtVerifierDefaultJwksCacheMaxAgeSeconds* = 600
+  jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds* = 60
+  jwtVerifierDefaultJwksFetchTimeoutMs* = 5000
+  jwtVerifierDefaultJwksPath* = "/.well-known/jwks.json"
+  neverFetchedJwksAt = int64.low
+
+proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader {.gcsafe.}
+
 proc nowUnix*(): int64 {.inline.} =
   getTime().toUnix()
+
+proc tokenAlgorithmName*(algorithm: BearerTokenAlgorithm): string =
+  case algorithm
+  of bearerTokenHS256: "HS256"
+  of bearerTokenRS256: "RS256"
+  of bearerTokenES256: "ES256"
+
+proc parseBearerTokenAlgorithm*(raw: string): BearerTokenAlgorithm =
+  case raw.strip().toUpperAscii()
+  of "HS256":
+    bearerTokenHS256
+  of "RS256":
+    bearerTokenRS256
+  of "ES256":
+    bearerTokenES256
+  else:
+    raise newException(ValueError, "token algorithm is not allowed")
+
+proc toJwtAlgorithm(algorithm: BearerTokenAlgorithm): SignatureAlgorithm =
+  case algorithm
+  of bearerTokenHS256: HS256
+  of bearerTokenRS256: RS256
+  of bearerTokenES256: ES256
+
+proc initPrivateSigningKeyFilePolicy*(
+    requireOwnerOnly = true,
+    allowSymlink = false,
+    maxBytes: Natural = privateSigningKeyFileDefaultMaxBytes,
+): PrivateSigningKeyFilePolicy =
+  ## Builds file-loading policy for private asymmetric JWT signing keys.
+  if maxBytes == 0:
+    raise newException(ValueError, "private signing key file maxBytes must be positive")
+  PrivateSigningKeyFilePolicy(
+    requireOwnerOnly: requireOwnerOnly, allowSymlink: allowSymlink, maxBytes: maxBytes
+  )
+
+proc validatePrivateSigningKeyFilePolicy(policy: PrivateSigningKeyFilePolicy) =
+  if policy.maxBytes == 0:
+    raise newException(ValueError, "private signing key file maxBytes must be positive")
+  if policy.maxBytes >= high(int):
+    raise newException(ValueError, "private signing key file maxBytes is too large")
+
+proc keyFileInfo(
+    path: string, description: string, policy: PrivateSigningKeyFilePolicy
+): FileInfo =
+  let linkInfo = getFileInfo(path, followSymlink = false)
+  case linkInfo.kind
+  of pcFile:
+    result = linkInfo
+  of pcLinkToFile:
+    if not policy.allowSymlink:
+      raise newException(ValueError, description & " must not be a symlink")
+    result = getFileInfo(path, followSymlink = true)
+    if result.kind != pcFile:
+      raise newException(ValueError, description & " must be a regular file")
+  of pcDir, pcLinkToDir:
+    raise newException(ValueError, description & " must be a regular file")
+
+proc validateKeyFileSize(
+    info: FileInfo, description: string, policy: PrivateSigningKeyFilePolicy
+) =
+  if info.size <= 0:
+    raise newException(ValueError, description & " must not be empty")
+  if info.size > BiggestInt(policy.maxBytes):
+    raise newException(ValueError, description & " exceeds maxBytes")
+
+proc validatePrivateKeyFilePermissions(
+    info: FileInfo, policy: PrivateSigningKeyFilePolicy
+) =
+  if not policy.requireOwnerOnly:
+    return
+
+  when defined(posix):
+    const unsafePermissions = {
+      fpUserExec, fpGroupExec, fpGroupWrite, fpGroupRead, fpOthersExec, fpOthersWrite,
+      fpOthersRead,
+    }
+    if fpUserRead notin info.permissions:
+      raise newException(ValueError, "private signing key file must be user readable")
+    if (info.permissions * unsafePermissions).len > 0:
+      raise newException(
+        ValueError, "private signing key file must be readable only by the file owner"
+      )
+  else:
+    discard
+
+proc readKeyFile(
+    path: string,
+    description: string,
+    policy: PrivateSigningKeyFilePolicy,
+    requireOwnerOnly: bool,
+): string =
+  let trimmedPath = path.strip()
+  if trimmedPath.len == 0:
+    raise newException(ValueError, description & " path must not be empty")
+
+  policy.validatePrivateSigningKeyFilePolicy()
+  let info = keyFileInfo(trimmedPath, description, policy)
+  validateKeyFileSize(info, description, policy)
+  if requireOwnerOnly:
+    validatePrivateKeyFilePermissions(info, policy)
+
+  var file: File
+  if not open(file, trimmedPath, fmRead):
+    raise newException(IOError, description & " could not be opened")
+
+  try:
+    let openedInfo = getFileInfo(file)
+    if openedInfo.kind != pcFile or openedInfo.id != info.id:
+      raise newException(ValueError, description & " changed while loading")
+    validateKeyFileSize(openedInfo, description, policy)
+
+    result = newString(int(policy.maxBytes) + 1)
+    let readLen = file.readChars(toOpenArray(result, 0, result.high))
+    result.setLen(readLen)
+  finally:
+    file.close()
+
+  if result.len == 0:
+    raise newException(ValueError, description & " must not be empty")
+  if result.len > int(policy.maxBytes):
+    raise newException(ValueError, description & " exceeds maxBytes")
+
+proc looksLikePemKey(value: string): bool =
+  let normalized = value.strip().toUpperAscii()
+  normalized.startsWith("-----BEGIN ") and " KEY-----" in normalized
+
+proc looksLikePrivatePemKey(value: string): bool =
+  let normalized = value.strip().toUpperAscii()
+  normalized.startsWith("-----BEGIN ") and "PRIVATE KEY-----" in normalized and
+    normalized.contains("-----END ")
+
+proc looksLikePublicPemKey(value: string): bool =
+  let normalized = value.strip().toUpperAscii()
+  normalized.startsWith("-----BEGIN ") and "PUBLIC KEY-----" in normalized and
+    normalized.contains("-----END ")
+
+proc validatePrivateSigningKeyPair(
+    privateKey, publicKey: string, algorithm: BearerTokenAlgorithm
+) =
+  var valid = false
+  try:
+    let signingInput = "sarcophagus jwt signing key file self-test"
+    let signature = signString(signingInput, privateKey, algorithm.toJwtAlgorithm())
+    valid =
+      signature.len > 0 and
+      verifySignature(signingInput, signature, publicKey, algorithm.toJwtAlgorithm())
+  except CatchableError:
+    valid = false
+
+  if not valid:
+    raise newException(
+      ValueError,
+      "private/public signing key files do not form a valid " &
+        tokenAlgorithmName(algorithm) & " key pair",
+    )
+
+proc initPublicSigningKey*(
+    kid: string, publicKey: string, algorithm: BearerTokenAlgorithm
+): SigningKey =
+  ## Builds a public-key verifier entry for asymmetric bearer tokens.
+  if algorithm == bearerTokenHS256:
+    raise newException(ValueError, "public signing keys must use RS256 or ES256")
+  SigningKey(kid: kid, publicKey: publicKey, algorithm: algorithm)
+
+proc initPrivateSigningKey*(
+    kid: string, privateKey: string, publicKey: string, algorithm: BearerTokenAlgorithm
+): SigningKey =
+  ## Builds an asymmetric signing key with matching public verifier material.
+  if algorithm == bearerTokenHS256:
+    raise newException(ValueError, "private signing keys must use RS256 or ES256")
+  if privateKey.strip().len == 0:
+    raise newException(ValueError, "private signing key material must not be empty")
+  if publicKey.strip().len == 0:
+    raise newException(ValueError, "public signing key material must not be empty")
+  SigningKey(
+    kid: kid, privateKey: privateKey, publicKey: publicKey, algorithm: algorithm
+  )
+
+proc initPrivateSigningKeyFromFiles*(
+    kid: string,
+    privateKeyPath: string,
+    publicKeyPath: string,
+    algorithm: BearerTokenAlgorithm,
+    policy = defaultPrivateSigningKeyFilePolicy,
+): SigningKey =
+  ## Loads an asymmetric signing key from PEM files and verifies the key pair.
+  if algorithm == bearerTokenHS256:
+    raise newException(ValueError, "private signing keys must use RS256 or ES256")
+
+  let privateKey = readKeyFile(
+    privateKeyPath, "private signing key file", policy, requireOwnerOnly = true
+  )
+  let publicKey = readKeyFile(
+    publicKeyPath, "public signing key file", policy, requireOwnerOnly = false
+  )
+
+  if not privateKey.looksLikePrivatePemKey():
+    raise newException(
+      ValueError, "private signing key file must contain a PEM private key"
+    )
+  if not publicKey.looksLikePublicPemKey():
+    let message = "public signing key file must contain a PEM public key"
+    raise newException(ValueError, message)
+
+  validatePrivateSigningKeyPair(privateKey, publicKey, algorithm)
+  initPrivateSigningKey(kid, privateKey, publicKey, algorithm)
+
+proc scopePart(raw: string, name: string): string =
+  result = raw.strip()
+  if result.len == 0:
+    raise newException(ValueError, name & " must not be empty")
+  if result.find({' ', '\t', '\n', '\r', ','}) >= 0:
+    raise newException(ValueError, name & " must not contain scope separators")
+
+proc claimScope*(scopePrefix, value: string): string =
+  ## Builds a normalized scope string from a JWT claim name/prefix and value.
+  runnableExamples:
+    doAssert claimScope("role", "authenticated") == "role:authenticated"
+    doAssert claimScope("permission", "photos:read") == "permission:photos:read"
+
+  scopePart(scopePrefix, "scope prefix") & ":" & scopePart(value, "scope value")
+
+proc initJwtScopeClaim*(claimName: string, scopePrefix = ""): JwtScopeClaim =
+  ## Maps a JWT claim's string values into `prefix:value` authorization scopes.
+  let normalizedClaimName = claimName.strip()
+  if normalizedClaimName.len == 0:
+    raise newException(ValueError, "JWT scope claim name must not be empty")
+  if normalizedClaimName.find({' ', '\t', '\n', '\r', ','}) >= 0:
+    raise newException(ValueError, "JWT scope claim name must not contain separators")
+
+  JwtScopeClaim(
+    claimName: normalizedClaimName,
+    scopePrefix:
+      if scopePrefix.strip().len == 0:
+        scopePart(normalizedClaimName, "scope prefix")
+      else:
+        scopePart(scopePrefix, "scope prefix"),
+  )
+
+proc claimName*(scopeClaim: JwtScopeClaim): lent string =
+  scopeClaim.claimName
+
+proc scopePrefix*(scopeClaim: JwtScopeClaim): lent string =
+  scopeClaim.scopePrefix
 
 proc parseScopeList*(raw: string): seq[string] =
   var seen = initHashSet[string]()
@@ -94,29 +419,348 @@ proc parseSigningKeys*(raw: string): seq[SigningKey] =
   if result.len == 0:
     raise newException(ValueError, "at least one signing key is required")
 
-proc initBearerTokenConfig*(
-    issuer: string, audience: string, keys: openArray[SigningKey], activeKid = ""
-): BearerTokenConfig =
+proc keyMaterial(key: SigningKey): string =
+  case key.algorithm
+  of bearerTokenHS256:
+    key.secret.strip()
+  of bearerTokenRS256, bearerTokenES256:
+    key.publicKey.strip()
+
+proc signingMaterial(key: SigningKey): string =
+  case key.algorithm
+  of bearerTokenHS256:
+    key.secret.strip()
+  of bearerTokenRS256, bearerTokenES256:
+    key.privateKey.strip()
+
+proc addVerifierKey(config: var JwtVerifierConfig, key: SigningKey) =
+  let kid = key.kid.strip()
+  let material = key.keyMaterial()
+  if kid.len == 0 or material.len == 0:
+    raise newException(
+      ValueError, "signing keys must include non-empty kid and key material"
+    )
+  if kid in config.keys:
+    raise newException(ValueError, "duplicate signing key id: " & kid)
+  config.keys[kid] = material
+  config.keyAlgorithms[kid] = key.algorithm
+
+proc addSigningKey(config: var BearerTokenConfig, key: SigningKey) =
+  let kid = key.kid.strip()
+  let material = key.signingMaterial()
+  if kid.len == 0 or material.len == 0:
+    return
+  config.signingKeys[kid] = material
+
+proc normalizeScopeClaims(scopeClaims: openArray[JwtScopeClaim]): seq[JwtScopeClaim] =
+  for scopeClaim in scopeClaims:
+    result.add(initJwtScopeClaim(scopeClaim.claimName, scopeClaim.scopePrefix))
+
+proc defaultJwksFetcher(url: string): string {.gcsafe.} =
+  var client =
+    newHttpClient(maxRedirects = 0, timeout = jwtVerifierDefaultJwksFetchTimeoutMs)
+  try:
+    client.getContent(url)
+  finally:
+    client.close()
+
+proc initJwksCache(
+    url: string,
+    cacheMaxAgeSeconds: Positive,
+    unknownKidRefreshCooldownSeconds: Natural,
+    fetcher: JwksFetcher,
+): JwtJwksCache =
+  let trimmedUrl = url.strip()
+  if trimmedUrl.len == 0:
+    return nil
+  if not trimmedUrl.startsWith("https://"):
+    raise newException(ValueError, "jwksUrl must use https")
+
+  new(result)
+  initLock(result.lock)
+  initLock(result.refreshLock)
+  result.url = trimmedUrl
+  result.cacheMaxAgeSeconds = int64(cacheMaxAgeSeconds)
+  result.unknownKidRefreshCooldownSeconds = int64(unknownKidRefreshCooldownSeconds)
+  result.fetchedAt = neverFetchedJwksAt
+  result.lastUnknownKidRefreshAt = neverFetchedJwksAt
+  result.keys = initTable[string, string]()
+  result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
+  if fetcher.isNil:
+    result.fetcher = proc(url: string): string {.gcsafe.} =
+      defaultJwksFetcher(url)
+  else:
+    result.fetcher = fetcher
+
+template warnJwtVerifierRemoteJwksWithoutSsl*(jwksUrl: static[string]) =
+  ## Emits a compile-time warning for literal remote JWKS URLs without SSL.
+  when jwksUrl.strip().len > 0 and not defined(ssl):
+    {.
+      warning:
+        "Remote JWKS verification was configured without -d:ssl; the default " &
+        "HTTPS fetcher requires SSL support. Compile with -d:ssl or pass a " &
+        "custom jwksFetcher that verifies TLS."
+    .}
+
+proc initJwtVerifierConfigImpl(
+    issuer: string,
+    audience: string,
+    keys: openArray[SigningKey] = [],
+    jwksUrl = "",
+    jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds: Natural =
+      jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+    jwksFetcher: JwksFetcher = nil,
+    scopeClaims: openArray[JwtScopeClaim] = [],
+): JwtVerifierConfig =
+  ## Builds a validation-only JWT verifier config.
   if issuer.strip().len == 0:
     raise newException(ValueError, "issuer must not be empty")
   if audience.strip().len == 0:
     raise newException(ValueError, "audience must not be empty")
-  if keys.len == 0:
-    raise newException(ValueError, "at least one signing key is required")
+  if keys.len == 0 and jwksUrl.strip().len == 0:
+    raise newException(ValueError, "at least one signing key or JWKS URL is required")
 
   result.issuer = issuer.strip()
   result.audience = audience.strip()
   result.keys = initTable[string, string]()
+  result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
+  result.scopeClaims = normalizeScopeClaims(scopeClaims)
+  result.jwks = initJwksCache(
+    jwksUrl, jwksCacheMaxAgeSeconds, jwksUnknownKidRefreshCooldownSeconds, jwksFetcher
+  )
 
   for key in keys:
-    let kid = key.kid.strip()
-    let secret = key.secret.strip()
-    if kid.len == 0 or secret.len == 0:
-      raise
-        newException(ValueError, "signing keys must include non-empty kid and secret")
-    if kid in result.keys:
-      raise newException(ValueError, "duplicate signing key id: " & kid)
-    result.keys[kid] = secret
+    result.addVerifierKey(key)
+
+proc initJwtVerifierConfig*(
+    issuer: string,
+    audience: string,
+    keys: openArray[SigningKey] = [],
+    jwksUrl = "",
+    jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds: Natural =
+      jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+    jwksFetcher: JwksFetcher = nil,
+    scopeClaims: openArray[JwtScopeClaim] = [],
+): JwtVerifierConfig =
+  ## Builds a validation-only JWT verifier config.
+  initJwtVerifierConfigImpl(
+    issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds, jwksFetcher, scopeClaims,
+  )
+
+proc initJwtVerifierConfig*(
+    issuer: string,
+    audience: string,
+    jwksUrl: static[string],
+    keys: openArray[SigningKey] = [],
+    jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds: Natural =
+      jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+    scopeClaims: openArray[JwtScopeClaim] = [],
+): JwtVerifierConfig =
+  ## Builds a validation-only JWT verifier config.
+  warnJwtVerifierRemoteJwksWithoutSsl(jwksUrl)
+  initJwtVerifierConfigImpl(
+    issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds, nil, scopeClaims,
+  )
+
+proc initJwtVerifierConfig*(
+    issuer: string,
+    audience: string,
+    keys: openArray[SigningKey],
+    jwksUrl: static[string],
+    jwksCacheMaxAgeSeconds: Positive = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds: Natural =
+      jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
+    scopeClaims: openArray[JwtScopeClaim] = [],
+): JwtVerifierConfig =
+  ## Builds a validation-only JWT verifier config.
+  warnJwtVerifierRemoteJwksWithoutSsl(jwksUrl)
+  initJwtVerifierConfigImpl(
+    issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
+    jwksUnknownKidRefreshCooldownSeconds, nil, scopeClaims,
+  )
+
+proc normalizeVerifierUrlPath(raw: string, name: string, allowEmpty: bool): string =
+  let trimmed = raw.strip()
+  if trimmed.len == 0:
+    if allowEmpty:
+      return ""
+    raise newException(ValueError, name & " must not be empty")
+  if trimmed.contains("://") or trimmed.contains("?") or trimmed.contains("#"):
+    raise newException(ValueError, name & " must be a URL path")
+
+  let path = trimmed.strip(chars = {'/'})
+  if path.len == 0:
+    if allowEmpty:
+      return ""
+    raise newException(ValueError, name & " must not be root")
+  "/" & path
+
+proc normalizeRequiredHostSuffix(raw: string): string =
+  result = raw.strip().toLowerAscii().strip(chars = {'.'})
+  if result.contains("/") or result.contains(":"):
+    raise newException(ValueError, "requiredHostSuffix must be a host suffix")
+
+proc initJwtVerifierUrlOptions*(
+    issuerPath = "",
+    jwksPath = jwtVerifierDefaultJwksPath,
+    requiredHostSuffix = "",
+    allowRootHost = true,
+    allowPort = true,
+): JwtVerifierUrlOptions =
+  ## Builds URL derivation options for external JWT verifier endpoints.
+  JwtVerifierUrlOptions(
+    issuerPath: normalizeVerifierUrlPath(issuerPath, "issuerPath", allowEmpty = true),
+    jwksPath: normalizeVerifierUrlPath(jwksPath, "jwksPath", allowEmpty = false),
+    requiredHostSuffix: normalizeRequiredHostSuffix(requiredHostSuffix),
+    allowRootHost: allowRootHost,
+    allowPort: allowPort,
+  )
+
+proc issuerPath*(options: JwtVerifierUrlOptions): lent string =
+  options.issuerPath
+
+proc jwksPath*(options: JwtVerifierUrlOptions): lent string =
+  options.jwksPath
+
+proc requiredHostSuffix*(options: JwtVerifierUrlOptions): lent string =
+  options.requiredHostSuffix
+
+proc allowRootHost*(options: JwtVerifierUrlOptions): bool =
+  options.allowRootHost
+
+proc allowPort*(options: JwtVerifierUrlOptions): bool =
+  options.allowPort
+
+proc hostMatchesRequiredSuffix(hostname: string, options: JwtVerifierUrlOptions): bool =
+  if options.requiredHostSuffix.len == 0:
+    return true
+  if hostname == options.requiredHostSuffix:
+    return options.allowRootHost
+  hostname.endsWith("." & options.requiredHostSuffix)
+
+proc deriveJwtVerifierUrls*(
+    baseUrl: string, options: JwtVerifierUrlOptions
+): JwtVerifierUrls =
+  ## Derives issuer and JWKS URLs from a provider base URL.
+  let normalizedOptions = initJwtVerifierUrlOptions(
+    issuerPath = options.issuerPath,
+    jwksPath = options.jwksPath,
+    requiredHostSuffix = options.requiredHostSuffix,
+    allowRootHost = options.allowRootHost,
+    allowPort = options.allowPort,
+  )
+  let rawUrl = baseUrl.strip()
+  if rawUrl.len == 0:
+    raise newException(ValueError, "JWT verifier base URL must not be empty")
+
+  let parsed = parseUri(rawUrl)
+  if parsed.scheme != "https":
+    raise newException(ValueError, "JWT verifier base URL must use https")
+  if parsed.hostname.len == 0:
+    raise newException(ValueError, "JWT verifier base URL must include a host")
+  if parsed.username.len > 0 or parsed.password.len > 0:
+    raise newException(ValueError, "JWT verifier base URL must not include user info")
+  if parsed.port.len > 0 and not normalizedOptions.allowPort:
+    raise newException(ValueError, "JWT verifier base URL must not include a port")
+  if parsed.query.len > 0 or parsed.anchor.len > 0:
+    raise newException(
+      ValueError, "JWT verifier base URL must not include query or fragment"
+    )
+
+  let hostname = parsed.hostname.toLowerAscii()
+  if not hostname.hostMatchesRequiredSuffix(normalizedOptions):
+    raise newException(
+      ValueError, "JWT verifier base URL host does not match required suffix"
+    )
+
+  let path = normalizeVerifierUrlPath(parsed.path, "base URL path", allowEmpty = true)
+  if path.len > 0 and path != normalizedOptions.issuerPath:
+    raise newException(
+      ValueError, "JWT verifier base URL path must be empty or match issuerPath"
+    )
+
+  var origin = "https://" & hostname
+  if parsed.port.len > 0:
+    origin.add ":" & parsed.port
+
+  JwtVerifierUrls(
+    issuer: origin & normalizedOptions.issuerPath,
+    jwksUrl: origin & normalizedOptions.jwksPath,
+  )
+
+proc deriveJwtVerifierUrls*(baseUrl: string): JwtVerifierUrls =
+  ## Derives issuer and JWKS URLs from a provider base URL.
+  deriveJwtVerifierUrls(baseUrl, initJwtVerifierUrlOptions())
+
+proc issuer*(config: JwtVerifierConfig): lent string =
+  config.issuer
+
+proc audience*(config: JwtVerifierConfig): lent string =
+  config.audience
+
+proc scopeClaims*(config: JwtVerifierConfig): seq[JwtScopeClaim] =
+  config.scopeClaims
+
+proc jwksUrl*(config: JwtVerifierConfig): string =
+  if config.jwks.isNil:
+    return ""
+  config.jwks.url
+
+proc jwksFetchedAt*(config: JwtVerifierConfig): int64 =
+  if config.jwks.isNil:
+    return 0
+  withLock config.jwks.lock:
+    if config.jwks.fetchedAt == neverFetchedJwksAt:
+      return 0
+    result = config.jwks.fetchedAt
+
+proc jwksCacheMaxAgeSeconds*(config: JwtVerifierConfig): int64 =
+  if config.jwks.isNil:
+    return 0
+  withLock config.jwks.lock:
+    result = config.jwks.cacheMaxAgeSeconds
+
+proc jwksUnknownKidRefreshCooldownSeconds*(config: JwtVerifierConfig): int64 =
+  if config.jwks.isNil:
+    return 0
+  withLock config.jwks.lock:
+    result = config.jwks.unknownKidRefreshCooldownSeconds
+
+proc len*(config: JwtVerifierConfig): int =
+  var kids = initHashSet[string]()
+  for kid in config.keys.keys:
+    kids.incl(kid)
+  if not config.jwks.isNil:
+    withLock config.jwks.lock:
+      for kid in config.jwks.keys.keys:
+        kids.incl(kid)
+  kids.len
+
+proc contains*(config: JwtVerifierConfig, kid: string): bool =
+  let trimmedKid = kid.strip()
+  if trimmedKid in config.keys:
+    return true
+  if config.jwks.isNil:
+    return false
+  withLock config.jwks.lock:
+    result = trimmedKid in config.jwks.keys
+
+proc initBearerTokenConfig*(
+    issuer: string, audience: string, keys: openArray[SigningKey], activeKid = ""
+): BearerTokenConfig =
+  let verifier = initJwtVerifierConfig(issuer, audience, keys)
+  result.issuer = verifier.issuer
+  result.audience = verifier.audience
+  result.keys = verifier.keys
+  result.keyAlgorithms = verifier.keyAlgorithms
+  result.signingKeys = initTable[string, string]()
+  for key in keys:
+    result.addSigningKey(key)
 
   result.activeKid =
     if activeKid.strip().len > 0:
@@ -180,8 +824,311 @@ proc base64UrlDecode(input: string): string =
     normalized.add('=')
   decode(normalized)
 
+proc derByte(value: int): string =
+  result = newString(1)
+  result[0] = char(value)
+
+proc derLength(length: int): string =
+  if length < 0:
+    raise newException(ValueError, "DER length must not be negative")
+  if length < 128:
+    return derByte(length)
+
+  var value = length
+  var bytes = ""
+  while value > 0:
+    bytes = derByte(value and 0xff) & bytes
+    value = value shr 8
+  derByte(0x80 or bytes.len) & bytes
+
+proc derValue(tag: int, content: string): string =
+  derByte(tag) & derLength(content.len) & content
+
+proc derSequence(parts: varargs[string]): string =
+  var content = ""
+  for part in parts:
+    content.add(part)
+  derValue(0x30, content)
+
+proc stripLeadingZeroBytes(bytes: string): string =
+  if bytes.len == 0:
+    return ""
+  var start = 0
+  while start < bytes.high and bytes[start] == char(0):
+    inc start
+  bytes[start .. ^1]
+
+proc derInteger(rawBytes: string): string =
+  var bytes = stripLeadingZeroBytes(rawBytes)
+  if bytes.len == 0:
+    bytes = "\0"
+  if (ord(bytes[0]) and 0x80) != 0:
+    bytes = "\0" & bytes
+  derValue(0x02, bytes)
+
+proc derBitString(bytes: string): string =
+  derValue(0x03, "\0" & bytes)
+
+proc publicKeyPemFromDer(der: string): string =
+  let encoded = encode(der)
+  result = "-----BEGIN PUBLIC KEY-----\n"
+  var offset = 0
+  while offset < encoded.len:
+    let nextOffset = min(offset + 64, encoded.len)
+    result.add(encoded[offset ..< nextOffset])
+    result.add('\n')
+    offset = nextOffset
+  result.add("-----END PUBLIC KEY-----")
+
+proc jwkString(jwk: JsonNode, key: string): string =
+  if jwk.kind != JObject or not jwk.hasKey(key) or jwk[key].kind != JString:
+    raise newException(ValueError, "jwk " & key & " must be a string")
+  jwk[key].getStr()
+
+proc optionalJwkString(jwk: JsonNode, key: string): string =
+  if jwk.kind != JObject or not jwk.hasKey(key):
+    return ""
+  if jwk[key].kind != JString:
+    raise newException(ValueError, "jwk " & key & " must be a string")
+  jwk[key].getStr()
+
+proc jwkAllowsVerification(jwk: JsonNode): bool =
+  let keyUse = optionalJwkString(jwk, "use")
+  if keyUse.len > 0 and keyUse != "sig":
+    return false
+
+  if not jwk.hasKey("key_ops"):
+    return true
+  if jwk["key_ops"].kind != JArray:
+    raise newException(ValueError, "jwk key_ops must be an array")
+
+  for item in jwk["key_ops"]:
+    if item.kind != JString:
+      raise newException(ValueError, "jwk key_ops entries must be strings")
+    if item.getStr() == "verify":
+      return true
+  false
+
+proc jwkAlgorithm(jwk: JsonNode): Option[BearerTokenAlgorithm] =
+  let rawAlgorithm = optionalJwkString(jwk, "alg")
+  if rawAlgorithm.len > 0:
+    try:
+      let algorithm = parseBearerTokenAlgorithm(rawAlgorithm)
+      if algorithm in {bearerTokenRS256, bearerTokenES256}:
+        return some(algorithm)
+      return none(BearerTokenAlgorithm)
+    except ValueError:
+      return none(BearerTokenAlgorithm)
+
+  case optionalJwkString(jwk, "kty")
+  of "RSA":
+    some(bearerTokenRS256)
+  of "EC":
+    if optionalJwkString(jwk, "crv") == "P-256":
+      some(bearerTokenES256)
+    else:
+      none(BearerTokenAlgorithm)
+  else:
+    none(BearerTokenAlgorithm)
+
+proc rsaJwkPublicKeyPem(jwk: JsonNode): string =
+  if jwkString(jwk, "kty") != "RSA":
+    raise newException(ValueError, "RS256 jwk must use RSA kty")
+
+  let modulus = base64UrlDecode(jwkString(jwk, "n"))
+  let exponent = base64UrlDecode(jwkString(jwk, "e"))
+  if modulus.len == 0 or exponent.len == 0:
+    raise newException(ValueError, "RSA jwk modulus and exponent must not be empty")
+
+  const
+    rsaEncryption = "\x06\x09\x2A\x86\x48\x86\xF7\x0D\x01\x01\x01"
+    derNull = "\x05\x00"
+  let algorithmIdentifier = derSequence(rsaEncryption, derNull)
+  let rsaPublicKey = derSequence(derInteger(modulus), derInteger(exponent))
+  publicKeyPemFromDer(derSequence(algorithmIdentifier, derBitString(rsaPublicKey)))
+
+proc ecP256JwkPublicKeyPem(jwk: JsonNode): string =
+  if jwkString(jwk, "kty") != "EC":
+    raise newException(ValueError, "ES256 jwk must use EC kty")
+  if jwkString(jwk, "crv") != "P-256":
+    raise newException(ValueError, "ES256 jwk must use P-256 crv")
+
+  let x = base64UrlDecode(jwkString(jwk, "x"))
+  let y = base64UrlDecode(jwkString(jwk, "y"))
+  if x.len != 32 or y.len != 32:
+    raise newException(ValueError, "P-256 jwk coordinates must be 32 bytes")
+
+  const
+    ecPublicKey = "\x06\x07\x2A\x86\x48\xCE\x3D\x02\x01"
+    prime256v1 = "\x06\x08\x2A\x86\x48\xCE\x3D\x03\x01\x07"
+  let algorithmIdentifier = derSequence(ecPublicKey, prime256v1)
+  let publicPoint = "\x04" & x & y
+  publicKeyPemFromDer(derSequence(algorithmIdentifier, derBitString(publicPoint)))
+
+proc signingKeyFromJwk(jwk: JsonNode): Option[SigningKey] =
+  if jwk.kind != JObject:
+    raise newException(ValueError, "jwks keys must be objects")
+  if not jwkAllowsVerification(jwk):
+    return none(SigningKey)
+
+  let algorithm = jwkAlgorithm(jwk)
+  if algorithm.isNone():
+    return none(SigningKey)
+
+  let kid = jwkString(jwk, "kid").strip()
+  if kid.len == 0:
+    raise newException(ValueError, "jwk kid must not be empty")
+
+  case algorithm.get()
+  of bearerTokenRS256:
+    some(initPublicSigningKey(kid, rsaJwkPublicKeyPem(jwk), bearerTokenRS256))
+  of bearerTokenES256:
+    some(initPublicSigningKey(kid, ecP256JwkPublicKeyPem(jwk), bearerTokenES256))
+  of bearerTokenHS256:
+    none(SigningKey)
+
+proc parseJwksSigningKeys*(jwksJson: string): seq[SigningKey] =
+  ## Parses supported public signing keys from a JWKS document.
+  let root = parseJson(jwksJson)
+  if root.kind != JObject or not root.hasKey("keys") or root["keys"].kind != JArray:
+    raise newException(ValueError, "jwks must contain a keys array")
+
+  var seen = initHashSet[string]()
+  for jwk in root["keys"]:
+    let key = signingKeyFromJwk(jwk)
+    if key.isSome():
+      let kid = key.get().kid
+      if kid in seen:
+        raise newException(ValueError, "duplicate jwk key id: " & kid)
+      seen.incl(kid)
+      result.add(key.get())
+
+proc verifierKeysFromJwks(jwksJson: string): VerifierKeySet =
+  result.keys = initTable[string, string]()
+  result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
+  for key in parseJwksSigningKeys(jwksJson):
+    let kid = key.kid.strip()
+    result.keys[kid] = key.keyMaterial()
+    result.keyAlgorithms[kid] = key.algorithm
+
+proc loadJwks(cache: JwtJwksCache, keySet: VerifierKeySet, now: int64) =
+  withLock cache.lock:
+    cache.keys = keySet.keys
+    cache.keyAlgorithms = keySet.keyAlgorithms
+    cache.fetchedAt = now
+
+proc jwksNeedsRefresh(cache: JwtJwksCache, now: int64): bool =
+  withLock cache.lock:
+    result =
+      cache.fetchedAt == neverFetchedJwksAt or
+      now - cache.fetchedAt >= cache.cacheMaxAgeSeconds
+
+proc shouldRefreshUnknownKid(cache: JwtJwksCache, now: int64): bool =
+  withLock cache.lock:
+    result =
+      cache.lastUnknownKidRefreshAt == neverFetchedJwksAt or
+      cache.unknownKidRefreshCooldownSeconds == 0 or
+      now - cache.lastUnknownKidRefreshAt >= cache.unknownKidRefreshCooldownSeconds
+    if result:
+      cache.lastUnknownKidRefreshAt = now
+
+proc refreshJwksCache(cache: JwtJwksCache, now: int64, force = false): bool {.gcsafe.} =
+  if cache.isNil:
+    return true
+  withLock cache.refreshLock:
+    if not force and not cache.jwksNeedsRefresh(now):
+      result = true
+    else:
+      try:
+        let keySet = verifierKeysFromJwks(cache.fetcher(cache.url))
+        cache.loadJwks(keySet, now)
+        var cacheMaxAgeSeconds: int64
+        withLock cache.lock:
+          cacheMaxAgeSeconds = cache.cacheMaxAgeSeconds
+        debug "jwks refreshed",
+          jwksUrl = cache.url,
+          keyCount = keySet.keys.len,
+          cacheMaxAgeSeconds = cacheMaxAgeSeconds
+        result = true
+      except CatchableError as e:
+        notice "jwks refresh failed", jwksUrl = cache.url, message = e.msg
+        result = false
+
+proc refreshJwks*(config: JwtVerifierConfig, now = nowUnix()): bool {.gcsafe.} =
+  ## Refreshes a configured JWKS cache immediately.
+  if config.jwks.isNil:
+    raise newException(ValueError, "JwtVerifierConfig has no JWKS URL")
+  config.jwks.refreshJwksCache(now, force = true)
+
+proc effectiveVerifierKeys(config: JwtVerifierConfig): VerifierKeySet {.gcsafe.} =
+  result.keys = config.keys
+  result.keyAlgorithms = config.keyAlgorithms
+  if config.jwks.isNil:
+    return
+
+  withLock config.jwks.lock:
+    for kid, material in config.jwks.keys:
+      if kid notin result.keys:
+        result.keys[kid] = material
+        result.keyAlgorithms[kid] = config.jwks.keyAlgorithms[kid]
+
+proc effectiveVerifierKeys(
+    config: JwtVerifierConfig, header: TokenHeader, now: int64
+): VerifierKeySet {.gcsafe.} =
+  if config.jwks.isNil:
+    return config.effectiveVerifierKeys()
+
+  var attemptedRefresh = false
+  if config.jwks.jwksNeedsRefresh(now):
+    attemptedRefresh = true
+    discard config.jwks.refreshJwksCache(now)
+
+  result = config.effectiveVerifierKeys()
+  if header.kid.len > 0 and header.kid notin result.keys and not attemptedRefresh:
+    if config.jwks.shouldRefreshUnknownKid(now):
+      discard config.jwks.refreshJwksCache(now, force = true)
+      result = config.effectiveVerifierKeys()
+
 proc hmacSha256(message: string, secret: string): seq[byte] =
   signString(message, secret, HS256)
+
+proc signBearerToken(
+    signingInput: string, key: string, algorithm: BearerTokenAlgorithm
+): seq[byte] =
+  case algorithm
+  of bearerTokenHS256:
+    hmacSha256(signingInput, key)
+  of bearerTokenRS256, bearerTokenES256:
+    signString(signingInput, key, algorithm.toJwtAlgorithm())
+
+proc keyAlgorithm(
+    keys: Table[string, string],
+    keyAlgorithms: Table[string, BearerTokenAlgorithm],
+    kid: string,
+): Option[BearerTokenAlgorithm] =
+  if kid in keyAlgorithms:
+    return some(keyAlgorithms[kid])
+  if kid in keys and keys[kid].looksLikePemKey():
+    return none(BearerTokenAlgorithm)
+  some(bearerTokenHS256)
+
+proc keyAlgorithm(
+    config: BearerTokenConfig, kid: string
+): Option[BearerTokenAlgorithm] =
+  keyAlgorithm(config.keys, config.keyAlgorithms, kid)
+
+proc signingKeyMaterial(
+    config: BearerTokenConfig, kid: string, algorithm: BearerTokenAlgorithm
+): Option[string] =
+  if kid in config.signingKeys:
+    let material = config.signingKeys[kid].strip()
+    if material.len > 0:
+      return some(material)
+  if algorithm == bearerTokenHS256 and kid in config.keys:
+    let material = config.keys[kid].strip()
+    if material.len > 0:
+      return some(material)
+  none(string)
 
 proc constantTimeEquals(lhs: string, rhs: string): bool =
   var diff = lhs.len xor rhs.len
@@ -252,18 +1199,63 @@ proc parseScopeClaim(payload: JsonNode): seq[string] =
   let node = payload["scope"]
   case node.kind
   of JString:
-    parseScopeList(node.getStr())
+    result = parseScopeList(node.getStr())
   of JArray:
     var rawScopes: seq[string] = @[]
     for item in node:
       if item.kind != JString:
         raise newException(ValueError, "token scope entries must be strings")
       rawScopes.add(item.getStr())
-    parseScopeList(rawScopes.join(" "))
+    result = parseScopeList(rawScopes.join(" "))
   else:
     raise newException(ValueError, "token scope claim must be a string or array")
 
-proc extractKid(token: string, fallbackKid: string): string =
+proc parseClaimScopeValues(node: JsonNode, claimName: string): seq[string] =
+  case node.kind
+  of JString:
+    result = parseScopeList(node.getStr())
+  of JArray:
+    for item in node:
+      if item.kind != JString:
+        raise newException(
+          ValueError, "token " & claimName & " claim entries must be strings"
+        )
+      for value in parseScopeList(item.getStr()):
+        result.add(value)
+  else:
+    raise newException(
+      ValueError, "token " & claimName & " claim must be a string or array"
+    )
+
+proc parseConfiguredScopeClaims(
+    payload: JsonNode, scopeClaims: openArray[JwtScopeClaim]
+): seq[string] =
+  if payload.kind != JObject:
+    return @[]
+
+  for scopeClaim in scopeClaims:
+    if not payload.hasKey(scopeClaim.claimName):
+      continue
+    for value in parseClaimScopeValues(
+      payload[scopeClaim.claimName], scopeClaim.claimName
+    ):
+      result.add(claimScope(scopeClaim.scopePrefix, value))
+
+proc mergeScopes(scopes, claimScopes: openArray[string]): seq[string] =
+  var allScopes: seq[string] = @[]
+  for scope in scopes:
+    allScopes.add(scope)
+  for scope in claimScopes:
+    allScopes.add(scope)
+  parseScopeList(allScopes.join(" "))
+
+proc base64UrlDecodeBytes(input: string): seq[byte] =
+  let decoded = base64UrlDecode(input)
+  result = newSeq[byte](decoded.len)
+  for idx, value in decoded:
+    result[idx] = byte(value)
+
+proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader {.gcsafe.} =
   let parts = token.split('.')
   if parts.len != 3:
     raise newException(ValueError, "malformed bearer token")
@@ -274,32 +1266,60 @@ proc extractKid(token: string, fallbackKid: string): string =
 
   if not headerJson.hasKey("alg"):
     raise newException(ValueError, "token header missing alg")
-  if headerJson["alg"].kind != JString or headerJson["alg"].getStr() != "HS256":
+  if headerJson["alg"].kind != JString:
     raise newException(ValueError, "token algorithm is not allowed")
+  result.algorithm = parseBearerTokenAlgorithm(headerJson["alg"].getStr())
 
   if headerJson.hasKey("typ"):
     if headerJson["typ"].kind != JString or headerJson["typ"].getStr() != "JWT":
       raise newException(ValueError, "token typ must be JWT")
 
+  result.kid = fallbackKid
   if headerJson.hasKey("kid"):
     if headerJson["kid"].kind != JString:
       raise newException(ValueError, "token kid must be a string")
     let kid = headerJson["kid"].getStr().strip()
     if kid.len == 0:
       raise newException(ValueError, "token kid is empty")
-    return kid
+    result.kid = kid
 
-  fallbackKid
+proc verifySignature(
+    key: string,
+    algorithm: BearerTokenAlgorithm,
+    signingInput: string,
+    signaturePart: string,
+): bool =
+  case algorithm
+  of bearerTokenHS256:
+    let expectedSignature = base64UrlEncodeBytes(hmacSha256(signingInput, key))
+    constantTimeEquals(expectedSignature, signaturePart)
+  of bearerTokenRS256, bearerTokenES256:
+    let signature = base64UrlDecodeBytes(signaturePart)
+    if signature.len == 0:
+      return false
+    verifySignature(signingInput, signature, key, algorithm.toJwtAlgorithm())
 
 proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string =
   if config.activeKid.len == 0 or config.activeKid notin config.keys:
     raise newException(ValueError, "activeKid does not reference a configured key")
+  let activeAlgorithm = config.keyAlgorithm(config.activeKid)
+  if activeAlgorithm.isNone():
+    raise newException(ValueError, "activeKid key algorithm is not configured")
+  let signingMaterial =
+    config.signingKeyMaterial(config.activeKid, activeAlgorithm.get())
+  if signingMaterial.isNone():
+    raise newException(ValueError, "activeKid does not reference signing key material")
   if spec.subject.strip().len == 0:
     raise newException(ValueError, "subject must not be empty")
   if spec.expiresAt <= spec.notBefore:
     raise newException(ValueError, "expiresAt must be greater than notBefore")
 
-  let headerJson = %*{"alg": "HS256", "typ": "JWT", "kid": config.activeKid}
+  let headerJson =
+    %*{
+      "alg": tokenAlgorithmName(activeAlgorithm.get()),
+      "typ": "JWT",
+      "kid": config.activeKid,
+    }
 
   var claimsJson =
     %*{
@@ -317,7 +1337,8 @@ proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string 
   let headerPart = base64UrlEncode($headerJson)
   let claimsPart = base64UrlEncode($claimsJson)
   let signingInput = headerPart & "." & claimsPart
-  let signature = hmacSha256(signingInput, config.keys[config.activeKid])
+  let signature =
+    signBearerToken(signingInput, signingMaterial.get(), activeAlgorithm.get())
   let signaturePart = base64UrlEncodeBytes(signature)
 
   info "bearer token minted",
@@ -329,8 +1350,13 @@ proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string 
 
   signingInput & "." & signaturePart
 
-proc validateBearerToken*(
-    config: BearerTokenConfig,
+proc validateBearerTokenInternal(
+    issuer: string,
+    audience: string,
+    keys: Table[string, string],
+    keyAlgorithms: Table[string, BearerTokenAlgorithm],
+    scopeClaims: openArray[JwtScopeClaim],
+    fallbackKid: string,
     token: string,
     requiredScopes: openArray[string] = [],
     now = nowUnix(),
@@ -346,14 +1372,21 @@ proc validateBearerToken*(
     if tokenParts.len != 3:
       return failure(401, "invalid_token", "Malformed bearer token")
 
-    let kid = extractKid(trimmedToken, config.activeKid)
-    if kid notin config.keys:
+    let header = parseTokenHeader(trimmedToken, fallbackKid)
+    if header.kid.len == 0:
+      return failure(401, "invalid_token", "Token key id is missing")
+    if header.kid notin keys:
       return failure(401, "invalid_token", "Unknown token key id")
+    let configuredAlgorithm = keyAlgorithm(keys, keyAlgorithms, header.kid)
+    if configuredAlgorithm.isNone():
+      return failure(401, "invalid_token", "Token key algorithm is not configured")
+    if header.algorithm != configuredAlgorithm.get():
+      return failure(401, "invalid_token", "Token algorithm does not match key")
 
     let signingInput = tokenParts[0] & "." & tokenParts[1]
-    let expectedSignature =
-      base64UrlEncodeBytes(hmacSha256(signingInput, config.keys[kid]))
-    if not constantTimeEquals(expectedSignature, tokenParts[2]):
+    if not verifySignature(
+      keys[header.kid], header.algorithm, signingInput, tokenParts[2]
+    ):
       return failure(401, "invalid_token", "Token signature is invalid")
 
     let payload = parseJson(base64UrlDecode(tokenParts[1]))
@@ -361,33 +1394,45 @@ proc validateBearerToken*(
       return failure(401, "invalid_token", "Token payload is invalid")
 
     let iss = jsonStringClaim(payload, "iss")
-    if iss.isNone() or iss.get() != config.issuer:
+    if iss.isNone() or iss.get() != issuer:
       return failure(401, "invalid_token", "Token issuer is invalid")
 
     let sub = jsonStringClaim(payload, "sub")
     if sub.isNone() or sub.get().strip().len == 0:
       return failure(401, "invalid_token", "Token subject is invalid")
 
-    if not payloadMatchesAudience(payload, config.audience):
+    if not payloadMatchesAudience(payload, audience):
       return failure(401, "invalid_token", "Token audience is invalid")
 
+    let iat = jsonIntClaim(payload, "iat")
+    if iat.isNone():
+      if payload.hasKey("iat"):
+        return failure(401, "invalid_token", "Token issued-at is invalid")
+      return failure(401, "invalid_token", "Token is missing iat")
+    if iat.get() > now:
+      return failure(401, "invalid_token", "Token issued-at is in the future")
+
     let nbf = jsonIntClaim(payload, "nbf")
+    if nbf.isNone() and payload.hasKey("nbf"):
+      return failure(401, "invalid_token", "Token not-before is invalid")
     if nbf.isSome() and now < nbf.get():
       return failure(401, "invalid_token", "Token is not valid yet")
 
     let exp = jsonIntClaim(payload, "exp")
     if exp.isNone():
+      if payload.hasKey("exp"):
+        return failure(401, "invalid_token", "Token expiration is invalid")
       return failure(401, "invalid_token", "Token is missing exp")
     if now >= exp.get():
       return failure(401, "invalid_token", "Token is expired")
 
-    let iat =
-      if payload.hasKey("iat"):
-        jsonIntClaim(payload, "iat").get(0)
-      else:
-        0'i64
     let tokenId = jsonStringClaim(payload, "jti").get("")
-    let tokenScopes = parseScopeClaim(payload)
+    let role = jsonStringClaim(payload, "role").get("").strip()
+    let clientId = jsonStringClaim(payload, "client_id").get("").strip()
+    let userId = jsonStringClaim(payload, "user_id").get("").strip()
+    let tokenScopes = mergeScopes(
+      parseScopeClaim(payload), parseConfiguredScopeClaims(payload, scopeClaims)
+    )
     if not hasAllScopes(tokenScopes, requiredScopes):
       return failure(403, "insufficient_scope", "Token scope is insufficient")
 
@@ -395,17 +1440,66 @@ proc validateBearerToken*(
       BearerTokenClaims(
         issuer: iss.get(),
         subject: sub.get().strip(),
-        audience: config.audience,
+        audience: audience,
         scopes: tokenScopes,
+        role: role,
+        clientId: clientId,
+        userId: userId,
         tokenId: tokenId,
-        keyId: kid,
-        issuedAt: iat,
-        notBefore: nbf.get(iat),
+        keyId: header.kid,
+        issuedAt: iat.get(),
+        notBefore: nbf.get(iat.get()),
         expiresAt: exp.get(),
       )
     )
   except CatchableError as e:
     failure(401, "invalid_token", e.msg)
+
+proc validateBearerToken*(
+    config: JwtVerifierConfig,
+    token: string,
+    requiredScopes: openArray[string] = [],
+    now = nowUnix(),
+): TokenValidationResult {.gcsafe.} =
+  let trimmedToken = token.strip()
+  if trimmedToken.len == 0:
+    return failure(401, "missing_token", "Missing bearer token")
+
+  let tokenParts = trimmedToken.split('.')
+  if tokenParts.len != 3:
+    return failure(401, "invalid_token", "Malformed bearer token")
+
+  let header =
+    try:
+      parseTokenHeader(trimmedToken, "")
+    except CatchableError as e:
+      return failure(401, "invalid_token", e.msg)
+  if header.kid.len == 0:
+    return failure(401, "invalid_token", "Token key id is missing")
+
+  let verifierKeys = config.effectiveVerifierKeys(header, now)
+  validateBearerTokenInternal(
+    config.issuer, config.audience, verifierKeys.keys, verifierKeys.keyAlgorithms,
+    config.scopeClaims, "", trimmedToken, requiredScopes, now,
+  )
+
+proc validateBearerToken*(
+    config: BearerTokenConfig,
+    token: string,
+    requiredScopes: openArray[string] = [],
+    now = nowUnix(),
+): TokenValidationResult =
+  validateBearerTokenInternal(
+    config.issuer,
+    config.audience,
+    config.keys,
+    config.keyAlgorithms,
+    [],
+    config.activeKid,
+    token,
+    requiredScopes,
+    now,
+  )
 
 proc bearerTokenFromAuthorizationHeader*(authorizationHeader: string): string =
   let trimmedHeader = authorizationHeader.strip()
