@@ -625,6 +625,9 @@ Important helpers:
 - `initJwtVerifierConfig` configures validation-only JWT verification.
 - `initPublicSigningKey` configures RS256 and ES256 public-key verification.
 
+`JwtVerifierConfig` exposes read-only issuer, audience, length, and key-id
+membership accessors. It does not expose configured key material.
+
 Use stable `kid` values and rotate verifier keys by adding new keys, then
 removing retired keys after issued tokens expire. For locally minted HS256
 tokens, rotate by adding new keys, changing `activeKid`, then removing retired

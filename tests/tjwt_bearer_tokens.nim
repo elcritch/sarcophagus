@@ -143,6 +143,12 @@ suite "bearer token core":
       audience = "external-api",
       keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
     )
+    check verifier.issuer == "external-issuer"
+    check verifier.audience == "external-api"
+    check verifier.len == 1
+    check "rsa-1" in verifier
+    check "missing" notin verifier
+
     let token = signedExternalToken("RS256", "rsa-1", rsPrivateKey)
     let validation =
       validateBearerToken(verifier, token, ["profile"], now = 1_700_000_010)

@@ -23,10 +23,10 @@ type
     keyAlgorithms*: Table[string, BearerTokenAlgorithm]
 
   JwtVerifierConfig* = object
-    issuer*: string
-    audience*: string
-    keys*: Table[string, string]
-    keyAlgorithms*: Table[string, BearerTokenAlgorithm]
+    issuer: string
+    audience: string
+    keys: Table[string, string]
+    keyAlgorithms: Table[string, BearerTokenAlgorithm]
 
   BearerTokenSpec* = object
     subject*: string
@@ -180,6 +180,18 @@ proc initJwtVerifierConfig*(
 
   for key in keys:
     result.addVerifierKey(key)
+
+proc issuer*(config: JwtVerifierConfig): lent string =
+  config.issuer
+
+proc audience*(config: JwtVerifierConfig): lent string =
+  config.audience
+
+proc len*(config: JwtVerifierConfig): int =
+  config.keys.len
+
+proc contains*(config: JwtVerifierConfig, kid: string): bool =
+  kid.strip() in config.keys
 
 proc initBearerTokenConfig*(
     issuer: string, audience: string, keys: openArray[SigningKey], activeKid = ""
