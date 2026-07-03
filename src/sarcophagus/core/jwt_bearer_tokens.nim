@@ -4,15 +4,23 @@ import jwt
 import chroniclers
 
 type
+  BearerTokenAlgorithm* = enum
+    bearerTokenHS256
+    bearerTokenRS256
+    bearerTokenES256
+
   SigningKey* = object
     kid*: string
     secret*: string
+    publicKey*: string
+    algorithm*: BearerTokenAlgorithm
 
   BearerTokenConfig* = object
     issuer*: string
     audience*: string
     activeKid*: string
     keys*: Table[string, string]
+    keyAlgorithms*: Table[string, BearerTokenAlgorithm]
 
   BearerTokenSpec* = object
     subject*: string
@@ -43,8 +51,43 @@ type
     claims*: BearerTokenClaims
     failure*: TokenValidationFailure
 
+type TokenHeader = object
+  algorithm: BearerTokenAlgorithm
+  kid: string
+
 proc nowUnix*(): int64 {.inline.} =
   getTime().toUnix()
+
+proc tokenAlgorithmName*(algorithm: BearerTokenAlgorithm): string =
+  case algorithm
+  of bearerTokenHS256: "HS256"
+  of bearerTokenRS256: "RS256"
+  of bearerTokenES256: "ES256"
+
+proc parseBearerTokenAlgorithm*(raw: string): BearerTokenAlgorithm =
+  case raw.strip().toUpperAscii()
+  of "HS256":
+    bearerTokenHS256
+  of "RS256":
+    bearerTokenRS256
+  of "ES256":
+    bearerTokenES256
+  else:
+    raise newException(ValueError, "token algorithm is not allowed")
+
+proc toJwtAlgorithm(algorithm: BearerTokenAlgorithm): SignatureAlgorithm =
+  case algorithm
+  of bearerTokenHS256: HS256
+  of bearerTokenRS256: RS256
+  of bearerTokenES256: ES256
+
+proc initPublicSigningKey*(
+    kid: string, publicKey: string, algorithm: BearerTokenAlgorithm
+): SigningKey =
+  ## Builds a public-key verifier entry for asymmetric bearer tokens.
+  if algorithm == bearerTokenHS256:
+    raise newException(ValueError, "public signing keys must use RS256 or ES256")
+  SigningKey(kid: kid, publicKey: publicKey, algorithm: algorithm)
 
 proc parseScopeList*(raw: string): seq[string] =
   var seen = initHashSet[string]()
@@ -94,6 +137,13 @@ proc parseSigningKeys*(raw: string): seq[SigningKey] =
   if result.len == 0:
     raise newException(ValueError, "at least one signing key is required")
 
+proc keyMaterial(key: SigningKey): string =
+  case key.algorithm
+  of bearerTokenHS256:
+    key.secret.strip()
+  of bearerTokenRS256, bearerTokenES256:
+    key.publicKey.strip()
+
 proc initBearerTokenConfig*(
     issuer: string, audience: string, keys: openArray[SigningKey], activeKid = ""
 ): BearerTokenConfig =
@@ -107,16 +157,19 @@ proc initBearerTokenConfig*(
   result.issuer = issuer.strip()
   result.audience = audience.strip()
   result.keys = initTable[string, string]()
+  result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
 
   for key in keys:
     let kid = key.kid.strip()
-    let secret = key.secret.strip()
-    if kid.len == 0 or secret.len == 0:
-      raise
-        newException(ValueError, "signing keys must include non-empty kid and secret")
+    let material = key.keyMaterial()
+    if kid.len == 0 or material.len == 0:
+      raise newException(
+        ValueError, "signing keys must include non-empty kid and key material"
+      )
     if kid in result.keys:
       raise newException(ValueError, "duplicate signing key id: " & kid)
-    result.keys[kid] = secret
+    result.keys[kid] = material
+    result.keyAlgorithms[kid] = key.algorithm
 
   result.activeKid =
     if activeKid.strip().len > 0:
@@ -182,6 +235,11 @@ proc base64UrlDecode(input: string): string =
 
 proc hmacSha256(message: string, secret: string): seq[byte] =
   signString(message, secret, HS256)
+
+proc keyAlgorithm(config: BearerTokenConfig, kid: string): BearerTokenAlgorithm =
+  if kid in config.keyAlgorithms:
+    return config.keyAlgorithms[kid]
+  bearerTokenHS256
 
 proc constantTimeEquals(lhs: string, rhs: string): bool =
   var diff = lhs.len xor rhs.len
@@ -263,7 +321,13 @@ proc parseScopeClaim(payload: JsonNode): seq[string] =
   else:
     raise newException(ValueError, "token scope claim must be a string or array")
 
-proc extractKid(token: string, fallbackKid: string): string =
+proc base64UrlDecodeBytes(input: string): seq[byte] =
+  let decoded = base64UrlDecode(input)
+  result = newSeq[byte](decoded.len)
+  for idx, value in decoded:
+    result[idx] = byte(value)
+
+proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader =
   let parts = token.split('.')
   if parts.len != 3:
     raise newException(ValueError, "malformed bearer token")
@@ -274,32 +338,54 @@ proc extractKid(token: string, fallbackKid: string): string =
 
   if not headerJson.hasKey("alg"):
     raise newException(ValueError, "token header missing alg")
-  if headerJson["alg"].kind != JString or headerJson["alg"].getStr() != "HS256":
+  if headerJson["alg"].kind != JString:
     raise newException(ValueError, "token algorithm is not allowed")
+  result.algorithm = parseBearerTokenAlgorithm(headerJson["alg"].getStr())
 
   if headerJson.hasKey("typ"):
     if headerJson["typ"].kind != JString or headerJson["typ"].getStr() != "JWT":
       raise newException(ValueError, "token typ must be JWT")
 
+  result.kid = fallbackKid
   if headerJson.hasKey("kid"):
     if headerJson["kid"].kind != JString:
       raise newException(ValueError, "token kid must be a string")
     let kid = headerJson["kid"].getStr().strip()
     if kid.len == 0:
       raise newException(ValueError, "token kid is empty")
-    return kid
+    result.kid = kid
 
-  fallbackKid
+proc verifySignature(
+    config: BearerTokenConfig,
+    header: TokenHeader,
+    signingInput: string,
+    signaturePart: string,
+): bool =
+  let key = config.keys[header.kid]
+  case header.algorithm
+  of bearerTokenHS256:
+    let expectedSignature = base64UrlEncodeBytes(hmacSha256(signingInput, key))
+    constantTimeEquals(expectedSignature, signaturePart)
+  of bearerTokenRS256, bearerTokenES256:
+    let signature = base64UrlDecodeBytes(signaturePart)
+    if signature.len == 0:
+      return false
+    verifySignature(signingInput, signature, key, header.algorithm.toJwtAlgorithm())
 
 proc mintBearerToken*(config: BearerTokenConfig, spec: BearerTokenSpec): string =
   if config.activeKid.len == 0 or config.activeKid notin config.keys:
     raise newException(ValueError, "activeKid does not reference a configured key")
+  if config.keyAlgorithm(config.activeKid) != bearerTokenHS256:
+    raise newException(ValueError, "activeKid must reference an HS256 signing key")
   if spec.subject.strip().len == 0:
     raise newException(ValueError, "subject must not be empty")
   if spec.expiresAt <= spec.notBefore:
     raise newException(ValueError, "expiresAt must be greater than notBefore")
 
-  let headerJson = %*{"alg": "HS256", "typ": "JWT", "kid": config.activeKid}
+  let headerJson =
+    %*{
+      "alg": tokenAlgorithmName(bearerTokenHS256), "typ": "JWT", "kid": config.activeKid
+    }
 
   var claimsJson =
     %*{
@@ -346,14 +432,14 @@ proc validateBearerToken*(
     if tokenParts.len != 3:
       return failure(401, "invalid_token", "Malformed bearer token")
 
-    let kid = extractKid(trimmedToken, config.activeKid)
-    if kid notin config.keys:
+    let header = parseTokenHeader(trimmedToken, config.activeKid)
+    if header.kid notin config.keys:
       return failure(401, "invalid_token", "Unknown token key id")
+    if header.algorithm != config.keyAlgorithm(header.kid):
+      return failure(401, "invalid_token", "Token algorithm does not match key")
 
     let signingInput = tokenParts[0] & "." & tokenParts[1]
-    let expectedSignature =
-      base64UrlEncodeBytes(hmacSha256(signingInput, config.keys[kid]))
-    if not constantTimeEquals(expectedSignature, tokenParts[2]):
+    if not config.verifySignature(header, signingInput, tokenParts[2]):
       return failure(401, "invalid_token", "Token signature is invalid")
 
     let payload = parseJson(base64UrlDecode(tokenParts[1]))
@@ -398,7 +484,7 @@ proc validateBearerToken*(
         audience: config.audience,
         scopes: tokenScopes,
         tokenId: tokenId,
-        keyId: kid,
+        keyId: header.kid,
         issuedAt: iat,
         notBefore: nbf.get(iat),
         expiresAt: exp.get(),

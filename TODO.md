@@ -4,7 +4,7 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
 
 ## Supabase and External JWT Verification
 
-- [ ] Add support for asymmetric-key bearer tokens, starting with `RS256` and
+- [x] Add support for asymmetric-key bearer tokens, starting with `RS256` and
   `ES256` verification using public keys.
 - [ ] Introduce a JWT verifier config separate from `BearerTokenConfig`, so
   Sarcophagus can validate external issuer tokens without implying it can mint

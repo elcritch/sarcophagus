@@ -572,9 +572,9 @@ true for those legacy hashes so they can be rotated to the fast format.
 
 ## `sarcophagus/core/jwt_bearer_tokens`
 
-The bearer-token module mints and validates signed HS256 JWT bearer tokens. OAuth2
-uses this module internally, but it is also usable directly for service-to-service
-tokens.
+The bearer-token module mints signed HS256 JWT bearer tokens and validates
+HS256, RS256, and ES256 bearer tokens. OAuth2 uses this module internally, but
+it is also usable directly for service-to-service tokens.
 
 ```nim
 let config = initBearerTokenConfig(
@@ -596,12 +596,33 @@ let validation = validateBearerToken(config, token, requiredScopes = ["jobs:read
 doAssert validation.ok
 ```
 
+For external tokens signed with asymmetric keys, configure public-key verifier
+entries. Sarcophagus validates these tokens but does not mint them:
+
+```nim
+let externalConfig = initBearerTokenConfig(
+  issuer = "https://project.example/auth/v1",
+  audience = "authenticated",
+  keys = [
+    initPublicSigningKey(
+      kid = "key-id",
+      publicKey = publicKeyPem,
+      algorithm = bearerTokenRS256,
+    )
+  ],
+)
+
+let validation = validateBearerToken(externalConfig, externalAccessToken)
+doAssert validation.ok
+```
+
 Important helpers:
 
 - `parseScopeList` accepts space, comma, tab, and newline separated scopes.
 - `scopeListToString` normalizes scopes for token claims.
 - `hasAllScopes` checks whether a token satisfies required scopes.
 - `parseSigningKeys` parses `kid:secret,kid2:secret2` strings for configuration.
+- `initPublicSigningKey` configures RS256 and ES256 public-key verification.
 
 Use stable `kid` values and rotate by adding new keys, changing `activeKid`, then
 removing retired keys after issued tokens expire.
