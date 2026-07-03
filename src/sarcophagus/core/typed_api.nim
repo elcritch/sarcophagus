@@ -8,7 +8,6 @@ else:
 
 when defined(feature.sarcophagus.cbor):
   import cborious
-  import cborious/cbor2json
   export cborious
 
 when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
@@ -217,15 +216,21 @@ proc decodeJsonApi*[T](body: string, target: typedesc[T]): T =
 when defined(feature.sarcophagus.cbor):
   proc encodeCborApi*[T](value: T): string =
     when T is JsonNode:
-      cbor2json.fromJsonNode(value)
+      {.cast(gcsafe).}:
+        toCbor(value, apiCborEncodingMode)
     else:
-      toCbor(value, apiCborEncodingMode)
+      {.cast(gcsafe).}:
+        toCbor(value, apiCborEncodingMode)
 
   proc decodeCborApi*[T](body: string, target: typedesc[T]): T =
     when T is JsonNode:
-      cbor2json.toJsonNode(body)
+      raise newException(
+        ValueError,
+        "CBOR JsonNode decoding is not supported by the current cborious version",
+      )
     else:
-      fromCbor(body, T, apiCborEncodingMode)
+      {.cast(gcsafe).}:
+        fromCbor(body, T, apiCborEncodingMode)
 
 when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
   proc encodeMsgPackApi*[T](value: T): string =
