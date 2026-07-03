@@ -54,29 +54,54 @@ MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEVs/o5+uQbTjL3chynL4wXgUg2R9
 q9UU8I5mEovUf86QZ7kOBIjJwqnzD1omageEHWwHdBO6B+dFabmdT9POxg==
 -----END PUBLIC KEY-----"""
 
-proc signedExternalToken(algorithm, kid, privateKey: string): string =
-  var header = %*{"alg": algorithm, "typ": "JWT"}
-  if kid.len > 0:
-    header["kid"] = newJString(kid)
-  let claims =
-    %*{
-      "iss": "external-issuer",
-      "sub": "user-123",
-      "aud": "external-api",
-      "iat": 1_700_000_000,
-      "nbf": 1_700_000_000,
-      "exp": 1_700_000_600,
-      "scope": "sync:read profile",
-    }
-  var token = initJWT(header.toHeader(), claims.toClaims())
-  token.sign(privateKey)
-  $token
+proc externalClaims(): JsonNode =
+  %*{
+    "iss": "external-issuer",
+    "sub": "user-123",
+    "aud": "external-api",
+    "iat": 1_700_000_000,
+    "nbf": 1_700_000_000,
+    "exp": 1_700_000_600,
+    "scope": "sync:read profile",
+  }
 
 proc base64UrlEncodeTest(input: string): string =
   result = encode(input)
   result = result.replace('+', '-')
   result = result.replace('/', '_')
   result = result.replace("=", "")
+
+proc base64UrlEncodeBytesTest(bytes: openArray[byte]): string =
+  var raw = newString(bytes.len)
+  for idx, value in bytes:
+    raw[idx] = char(value)
+  base64UrlEncodeTest(raw)
+
+proc testSignatureAlgorithm(algorithm: string): SignatureAlgorithm =
+  case algorithm
+  of "HS256":
+    HS256
+  of "RS256":
+    RS256
+  of "ES256":
+    ES256
+  else:
+    raise newException(ValueError, "unsupported test algorithm")
+
+proc signedExternalTokenWithClaims(
+    algorithm, kid, privateKey: string, claims: JsonNode
+): string =
+  var header = %*{"alg": algorithm, "typ": "JWT"}
+  if kid.len > 0:
+    header["kid"] = newJString(kid)
+
+  let signingInput = base64UrlEncodeTest($header) & "." & base64UrlEncodeTest($claims)
+  let signature =
+    signString(signingInput, privateKey, algorithm.testSignatureAlgorithm())
+  signingInput & "." & base64UrlEncodeBytesTest(signature)
+
+proc signedExternalToken(algorithm, kid, privateKey: string): string =
+  signedExternalTokenWithClaims(algorithm, kid, privateKey, externalClaims())
 
 proc tokenWithHeader(header: JsonNode): string =
   base64UrlEncodeTest($header) & ".not-json.signature"
@@ -264,6 +289,153 @@ suite "bearer token core":
     check validation.failure.statusCode == 401
     check validation.failure.code == "invalid_token"
     check validation.failure.message == "Unknown token key id"
+
+  test "claim validation rejects invalid issuer audience and subject":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+
+    block invalidIssuer:
+      let claims = externalClaims()
+      claims["iss"] = newJString("other-issuer")
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check not validation.ok
+      check validation.failure.statusCode == 401
+      check validation.failure.code == "invalid_token"
+      check validation.failure.message == "Token issuer is invalid"
+
+    block invalidAudience:
+      let claims = externalClaims()
+      claims["aud"] = newJString("other-api")
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check not validation.ok
+      check validation.failure.statusCode == 401
+      check validation.failure.code == "invalid_token"
+      check validation.failure.message == "Token audience is invalid"
+
+    block invalidSubject:
+      let claims = externalClaims()
+      claims["sub"] = newJString("")
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check not validation.ok
+      check validation.failure.statusCode == 401
+      check validation.failure.code == "invalid_token"
+      check validation.failure.message == "Token subject is invalid"
+
+  test "claim validation requires and validates issued-at":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+
+    block missingIssuedAt:
+      let claims = externalClaims()
+      claims.delete("iat")
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check not validation.ok
+      check validation.failure.statusCode == 401
+      check validation.failure.code == "invalid_token"
+      check validation.failure.message == "Token is missing iat"
+
+    block invalidIssuedAt:
+      let claims = externalClaims()
+      claims["iat"] = newJString("now")
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check not validation.ok
+      check validation.failure.statusCode == 401
+      check validation.failure.code == "invalid_token"
+      check validation.failure.message == "Token issued-at is invalid"
+
+    block futureIssuedAt:
+      let claims = externalClaims()
+      claims["iat"] = newJInt(1_700_000_020)
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check not validation.ok
+      check validation.failure.statusCode == 401
+      check validation.failure.code == "invalid_token"
+      check validation.failure.message == "Token issued-at is in the future"
+
+  test "claim validation requires and validates expiration":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+
+    block invalidExpiration:
+      let claims = externalClaims()
+      claims["exp"] = newJString("later")
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check not validation.ok
+      check validation.failure.statusCode == 401
+      check validation.failure.code == "invalid_token"
+      check validation.failure.message == "Token expiration is invalid"
+
+    block expired:
+      let claims = externalClaims()
+      claims["exp"] = newJInt(1_700_000_010)
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check not validation.ok
+      check validation.failure.statusCode == 401
+      check validation.failure.code == "invalid_token"
+      check validation.failure.message == "Token is expired"
+
+  test "claim validation accepts optional nbf and validates it when present":
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256)],
+    )
+
+    block missingNotBefore:
+      let claims = externalClaims()
+      claims.delete("nbf")
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check validation.ok
+      check validation.claims.notBefore == 1_700_000_000
+
+    block invalidNotBefore:
+      let claims = externalClaims()
+      claims["nbf"] = newJString("later")
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check not validation.ok
+      check validation.failure.statusCode == 401
+      check validation.failure.code == "invalid_token"
+      check validation.failure.message == "Token not-before is invalid"
+
+    block futureNotBefore:
+      let claims = externalClaims()
+      claims["nbf"] = newJInt(1_700_000_020)
+      let token = signedExternalTokenWithClaims("RS256", "rsa-1", rsPrivateKey, claims)
+      let validation = validateBearerToken(verifier, token, now = 1_700_000_010)
+
+      check not validation.ok
+      check validation.failure.statusCode == 401
+      check validation.failure.code == "invalid_token"
+      check validation.failure.message == "Token is not valid yet"
 
   test "validation rejects tokens when alg does not match configured key":
     let config = initBearerTokenConfig(

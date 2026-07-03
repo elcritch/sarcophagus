@@ -514,21 +514,28 @@ proc validateBearerTokenInternal(
     if not payloadMatchesAudience(payload, audience):
       return failure(401, "invalid_token", "Token audience is invalid")
 
+    let iat = jsonIntClaim(payload, "iat")
+    if iat.isNone():
+      if payload.hasKey("iat"):
+        return failure(401, "invalid_token", "Token issued-at is invalid")
+      return failure(401, "invalid_token", "Token is missing iat")
+    if iat.get() > now:
+      return failure(401, "invalid_token", "Token issued-at is in the future")
+
     let nbf = jsonIntClaim(payload, "nbf")
+    if nbf.isNone() and payload.hasKey("nbf"):
+      return failure(401, "invalid_token", "Token not-before is invalid")
     if nbf.isSome() and now < nbf.get():
       return failure(401, "invalid_token", "Token is not valid yet")
 
     let exp = jsonIntClaim(payload, "exp")
     if exp.isNone():
+      if payload.hasKey("exp"):
+        return failure(401, "invalid_token", "Token expiration is invalid")
       return failure(401, "invalid_token", "Token is missing exp")
     if now >= exp.get():
       return failure(401, "invalid_token", "Token is expired")
 
-    let iat =
-      if payload.hasKey("iat"):
-        jsonIntClaim(payload, "iat").get(0)
-      else:
-        0'i64
     let tokenId = jsonStringClaim(payload, "jti").get("")
     let tokenScopes = parseScopeClaim(payload)
     if not hasAllScopes(tokenScopes, requiredScopes):
@@ -542,8 +549,8 @@ proc validateBearerTokenInternal(
         scopes: tokenScopes,
         tokenId: tokenId,
         keyId: header.kid,
-        issuedAt: iat,
-        notBefore: nbf.get(iat),
+        issuedAt: iat.get(),
+        notBefore: nbf.get(iat.get()),
         expiresAt: exp.get(),
       )
     )

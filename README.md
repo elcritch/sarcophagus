@@ -632,6 +632,10 @@ Validation checks JWT header `alg`, `kid`, and `typ` before claims are parsed or
 trusted. Unsupported algorithms, malformed key ids, unknown keys, and non-JWT
 types are rejected as invalid tokens.
 
+Validated claims include `iss`, `aud`, `sub`, `exp`, `iat`, and the header
+`kid`. The optional `nbf` claim is enforced when present, and otherwise defaults
+to `iat` in returned claims.
+
 Use stable `kid` values and rotate verifier keys by adding new keys, then
 removing retired keys after issued tokens expire. For locally minted HS256
 tokens, rotate by adding new keys, changing `activeKid`, then removing retired

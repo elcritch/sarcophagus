@@ -11,7 +11,7 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
   them.
 - [x] Parse and validate JWT headers for `alg`, `kid`, and `typ`, rejecting
   unsupported algorithms and unknown keys before claims are trusted.
-- [ ] Validate standard external JWT claims: issuer, audience, subject,
+- [x] Validate standard external JWT claims: issuer, audience, subject,
   expiration, not-before, issued-at, and key id.
 - [ ] Add JWKS loading and caching for asymmetric providers, including refresh
   on unknown `kid` and cache-age behavior suitable for Supabase key rotation.
