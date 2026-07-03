@@ -15,8 +15,8 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
   expiration, not-before, issued-at, and key id.
 - [x] Add JWKS loading and caching for asymmetric providers, including refresh
   on unknown `kid` and cache-age behavior suitable for Supabase key rotation.
-- [ ] Add a Supabase-oriented helper that derives issuer and JWKS URL from a
-  project URL: `https://<project-ref>.supabase.co/auth/v1`.
+- [x] Add generic issuer/JWKS URL derivation helpers plus a Supabase module
+  that derives URLs from `https://<project-ref>.supabase.co/auth/v1`.
 - [ ] Support claim-based authorization for Supabase tokens, including `role`,
   `client_id`, `user_id`, and optional custom scope claims.
 - [ ] Wire external JWT validation into raw Mummy wrappers and TAPIS security
@@ -24,6 +24,8 @@ Potential future Sarcophagus features, roughly ordered by expected leverage.
 - [ ] Document the fallback path for legacy Supabase `HS256` projects, where
   public-key verification is not possible and callers must either use the
   shared secret locally or call Supabase Auth to verify the token.
+- [ ] Add optional `RS256` and `ES256` bearer-token minting support using
+  private signing keys, while keeping `JwtVerifierConfig` validation-only.
 
 ## High Value
 

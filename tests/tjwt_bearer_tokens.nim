@@ -282,7 +282,7 @@ suite "bearer token core":
   test "jwks verifier loads caches expires and refreshes unknown kid":
     var fetchCount = 0
     let fetcher: JwksFetcher = proc(url: string): string =
-      check url == "https://project.supabase.co/auth/v1/.well-known/jwks.json"
+      check url == "https://issuer.example/.well-known/jwks.json"
       inc fetchCount
       case fetchCount
       of 1:
@@ -295,12 +295,12 @@ suite "bearer token core":
     let verifier = initJwtVerifierConfig(
       issuer = "external-issuer",
       audience = "external-api",
-      jwksUrl = "https://project.supabase.co/auth/v1/.well-known/jwks.json",
+      jwksUrl = "https://issuer.example/.well-known/jwks.json",
       jwksCacheMaxAgeSeconds = 10,
       jwksFetcher = fetcher,
     )
     check verifier.len == 0
-    check verifier.jwksUrl == "https://project.supabase.co/auth/v1/.well-known/jwks.json"
+    check verifier.jwksUrl == "https://issuer.example/.well-known/jwks.json"
     check verifier.jwksCacheMaxAgeSeconds == 10
     check verifier.jwksUnknownKidRefreshCooldownSeconds == 60
 
@@ -349,7 +349,7 @@ suite "bearer token core":
   test "jwks unknown kid cooldown can be disabled":
     var fetchCount = 0
     let fetcher: JwksFetcher = proc(url: string): string =
-      check url == "https://project.supabase.co/auth/v1/.well-known/jwks.json"
+      check url == "https://issuer.example/.well-known/jwks.json"
       inc fetchCount
       case fetchCount
       of 1:
@@ -362,7 +362,7 @@ suite "bearer token core":
     let verifier = initJwtVerifierConfig(
       issuer = "external-issuer",
       audience = "external-api",
-      jwksUrl = "https://project.supabase.co/auth/v1/.well-known/jwks.json",
+      jwksUrl = "https://issuer.example/.well-known/jwks.json",
       jwksCacheMaxAgeSeconds = 100,
       jwksUnknownKidRefreshCooldownSeconds = 0,
       jwksFetcher = fetcher,
@@ -381,12 +381,46 @@ suite "bearer token core":
     check validateBearerToken(verifier, thirdToken, now = 1_700_000_012).ok
     check fetchCount == 3
 
+  test "jwt verifier url helper derives issuer and jwks urls":
+    block defaultPaths:
+      let urls = deriveJwtVerifierUrls(" https://issuer.example/ ")
+      check urls.issuer == "https://issuer.example"
+      check urls.jwksUrl == "https://issuer.example/.well-known/jwks.json"
+
+    block customPaths:
+      let options = initJwtVerifierUrlOptions(
+        issuerPath = "/tenant-a",
+        jwksPath = "/tenant-a/keys.json",
+        requiredHostSuffix = "example.com",
+        allowRootHost = false,
+        allowPort = false,
+      )
+      let urls = deriveJwtVerifierUrls("https://AUTH.example.com/tenant-a/", options)
+      check urls.issuer == "https://auth.example.com/tenant-a"
+      check urls.jwksUrl == "https://auth.example.com/tenant-a/keys.json"
+
+  test "jwt verifier url helper rejects unsupported provider urls":
+    let options = initJwtVerifierUrlOptions(
+      issuerPath = "/tenant-a",
+      jwksPath = "/tenant-a/keys.json",
+      requiredHostSuffix = "example.com",
+      allowRootHost = false,
+      allowPort = false,
+    )
+    for invalidUrl in [
+      "", "http://auth.example.com", "https://example.com",
+      "https://auth.example.com:443", "https://auth.example.com/other",
+      "https://auth.example.com/tenant-a?x=1", "https://auth.example.com.evil.test",
+    ]:
+      expect ValueError:
+        discard deriveJwtVerifierUrls(invalidUrl, options)
+
   test "jwks verifier requires https urls and skips symmetric jwks entries":
     expect ValueError:
       discard initJwtVerifierConfig(
         issuer = "external-issuer",
         audience = "external-api",
-        jwksUrl = "http://project.supabase.co/auth/v1/.well-known/jwks.json",
+        jwksUrl = "http://issuer.example/.well-known/jwks.json",
       )
 
     let keys = parseJwksSigningKeys(

@@ -619,18 +619,38 @@ doAssert validation.ok
 For providers that expose a JWKS endpoint, configure a verifier with a JWKS URL.
 The cache defaults to 600 seconds, matching Supabase's documented edge-cache
 window. Validation refreshes once early when a token uses an unknown `kid`, then
-rate-limits additional unknown-`kid` refresh attempts for 60 seconds by default:
+rate-limits additional unknown-`kid` refresh attempts for 60 seconds by default.
+Provider integrations can be small modules built on the reusable URL derivation
+helpers. For example, `sarcophagus/security/supabase_jwt` provides Supabase
+defaults:
 
 ```nim
-let supabaseVerifier = initJwtVerifierConfig(
-  issuer = "https://project-id.supabase.co/auth/v1",
-  audience = "authenticated",
-  jwksUrl = "https://project-id.supabase.co/auth/v1/.well-known/jwks.json",
+let supabaseVerifier = initSupabaseJwtVerifierConfig(
+  projectUrl = "https://project-id.supabase.co",
   jwksUnknownKidRefreshCooldownSeconds = 60,
 )
 
 let validation = validateBearerToken(supabaseVerifier, supabaseAccessToken)
 doAssert validation.ok
+```
+
+Custom provider modules can use the same core helpers:
+
+```nim
+let urls = deriveJwtVerifierUrls(
+  "https://auth.example.com",
+  initJwtVerifierUrlOptions(
+    issuerPath = "/tenant-a",
+    jwksPath = "/tenant-a/.well-known/jwks.json",
+    requiredHostSuffix = "example.com",
+  ),
+)
+
+let externalVerifier = initJwtVerifierConfig(
+  issuer = urls.issuer,
+  audience = "example-api",
+  jwksUrl = urls.jwksUrl,
+)
 ```
 
 Important helpers:
@@ -643,6 +663,11 @@ Important helpers:
 - `initPublicSigningKey` configures RS256 and ES256 public-key verification.
 - `parseJwksSigningKeys` converts supported RSA and P-256 JWKS entries into
   verifier keys.
+- `initJwtVerifierUrlOptions` configures generic provider URL derivation.
+- `deriveJwtVerifierUrls` derives issuer and JWKS URLs from provider base URLs.
+- `initSupabaseJwtVerifierConfig` in `sarcophagus/security/supabase_jwt`
+  configures validation for Supabase access tokens with audience
+  `authenticated` by default.
 - `refreshJwks` refreshes a configured JWKS cache explicitly.
 
 `JwtVerifierConfig` exposes read-only issuer, audience, length, and key-id

@@ -1,4 +1,5 @@
-import std/[base64, httpclient, json, locks, options, sets, strutils, tables, times]
+import
+  std/[base64, httpclient, json, locks, options, sets, strutils, tables, times, uri]
 
 import jwt
 import chroniclers
@@ -30,6 +31,17 @@ type
     keys: Table[string, string]
     keyAlgorithms: Table[string, BearerTokenAlgorithm]
     jwks: JwtJwksCache
+
+  JwtVerifierUrls* = object
+    issuer*: string
+    jwksUrl*: string
+
+  JwtVerifierUrlOptions* = object
+    issuerPath: string
+    jwksPath: string
+    requiredHostSuffix: string
+    allowRootHost: bool
+    allowPort: bool
 
   BearerTokenSpec* = object
     subject*: string
@@ -84,6 +96,7 @@ const
   jwtVerifierDefaultJwksCacheMaxAgeSeconds* = 600
   jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds* = 60
   jwtVerifierDefaultJwksFetchTimeoutMs* = 5000
+  jwtVerifierDefaultJwksPath* = "/.well-known/jwks.json"
   neverFetchedJwksAt = int64.low
 
 proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader
@@ -221,7 +234,8 @@ proc initJwksCache(
   result.keyAlgorithms = initTable[string, BearerTokenAlgorithm]()
   result.fetcher = effectiveFetcher
 
-template warnRemoteJwksWithoutSsl(jwksUrl: static[string]) =
+template warnJwtVerifierRemoteJwksWithoutSsl*(jwksUrl: static[string]) =
+  ## Emits a compile-time warning for literal remote JWKS URLs without SSL.
   when jwksUrl.strip().len > 0 and not defined(ssl):
     {.
       warning:
@@ -285,7 +299,7 @@ proc initJwtVerifierConfig*(
       jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
 ): JwtVerifierConfig =
   ## Builds a validation-only JWT verifier config.
-  warnRemoteJwksWithoutSsl(jwksUrl)
+  warnJwtVerifierRemoteJwksWithoutSsl(jwksUrl)
   initJwtVerifierConfigImpl(
     issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
     jwksUnknownKidRefreshCooldownSeconds, nil,
@@ -301,11 +315,124 @@ proc initJwtVerifierConfig*(
       jwtVerifierDefaultJwksUnknownKidRefreshCooldownSeconds,
 ): JwtVerifierConfig =
   ## Builds a validation-only JWT verifier config.
-  warnRemoteJwksWithoutSsl(jwksUrl)
+  warnJwtVerifierRemoteJwksWithoutSsl(jwksUrl)
   initJwtVerifierConfigImpl(
     issuer, audience, keys, jwksUrl, jwksCacheMaxAgeSeconds,
     jwksUnknownKidRefreshCooldownSeconds, nil,
   )
+
+proc normalizeVerifierUrlPath(raw: string, name: string, allowEmpty: bool): string =
+  let trimmed = raw.strip()
+  if trimmed.len == 0:
+    if allowEmpty:
+      return ""
+    raise newException(ValueError, name & " must not be empty")
+  if trimmed.contains("://") or trimmed.contains("?") or trimmed.contains("#"):
+    raise newException(ValueError, name & " must be a URL path")
+
+  let path = trimmed.strip(chars = {'/'})
+  if path.len == 0:
+    if allowEmpty:
+      return ""
+    raise newException(ValueError, name & " must not be root")
+  "/" & path
+
+proc normalizeRequiredHostSuffix(raw: string): string =
+  result = raw.strip().toLowerAscii().strip(chars = {'.'})
+  if result.contains("/") or result.contains(":"):
+    raise newException(ValueError, "requiredHostSuffix must be a host suffix")
+
+proc initJwtVerifierUrlOptions*(
+    issuerPath = "",
+    jwksPath = jwtVerifierDefaultJwksPath,
+    requiredHostSuffix = "",
+    allowRootHost = true,
+    allowPort = true,
+): JwtVerifierUrlOptions =
+  ## Builds URL derivation options for external JWT verifier endpoints.
+  JwtVerifierUrlOptions(
+    issuerPath: normalizeVerifierUrlPath(issuerPath, "issuerPath", allowEmpty = true),
+    jwksPath: normalizeVerifierUrlPath(jwksPath, "jwksPath", allowEmpty = false),
+    requiredHostSuffix: normalizeRequiredHostSuffix(requiredHostSuffix),
+    allowRootHost: allowRootHost,
+    allowPort: allowPort,
+  )
+
+proc issuerPath*(options: JwtVerifierUrlOptions): lent string =
+  options.issuerPath
+
+proc jwksPath*(options: JwtVerifierUrlOptions): lent string =
+  options.jwksPath
+
+proc requiredHostSuffix*(options: JwtVerifierUrlOptions): lent string =
+  options.requiredHostSuffix
+
+proc allowRootHost*(options: JwtVerifierUrlOptions): bool =
+  options.allowRootHost
+
+proc allowPort*(options: JwtVerifierUrlOptions): bool =
+  options.allowPort
+
+proc hostMatchesRequiredSuffix(hostname: string, options: JwtVerifierUrlOptions): bool =
+  if options.requiredHostSuffix.len == 0:
+    return true
+  if hostname == options.requiredHostSuffix:
+    return options.allowRootHost
+  hostname.endsWith("." & options.requiredHostSuffix)
+
+proc deriveJwtVerifierUrls*(
+    baseUrl: string, options: JwtVerifierUrlOptions
+): JwtVerifierUrls =
+  ## Derives issuer and JWKS URLs from a provider base URL.
+  let normalizedOptions = initJwtVerifierUrlOptions(
+    issuerPath = options.issuerPath,
+    jwksPath = options.jwksPath,
+    requiredHostSuffix = options.requiredHostSuffix,
+    allowRootHost = options.allowRootHost,
+    allowPort = options.allowPort,
+  )
+  let rawUrl = baseUrl.strip()
+  if rawUrl.len == 0:
+    raise newException(ValueError, "JWT verifier base URL must not be empty")
+
+  let parsed = parseUri(rawUrl)
+  if parsed.scheme != "https":
+    raise newException(ValueError, "JWT verifier base URL must use https")
+  if parsed.hostname.len == 0:
+    raise newException(ValueError, "JWT verifier base URL must include a host")
+  if parsed.username.len > 0 or parsed.password.len > 0:
+    raise newException(ValueError, "JWT verifier base URL must not include user info")
+  if parsed.port.len > 0 and not normalizedOptions.allowPort:
+    raise newException(ValueError, "JWT verifier base URL must not include a port")
+  if parsed.query.len > 0 or parsed.anchor.len > 0:
+    raise newException(
+      ValueError, "JWT verifier base URL must not include query or fragment"
+    )
+
+  let hostname = parsed.hostname.toLowerAscii()
+  if not hostname.hostMatchesRequiredSuffix(normalizedOptions):
+    raise newException(
+      ValueError, "JWT verifier base URL host does not match required suffix"
+    )
+
+  let path = normalizeVerifierUrlPath(parsed.path, "base URL path", allowEmpty = true)
+  if path.len > 0 and path != normalizedOptions.issuerPath:
+    raise newException(
+      ValueError, "JWT verifier base URL path must be empty or match issuerPath"
+    )
+
+  var origin = "https://" & hostname
+  if parsed.port.len > 0:
+    origin.add ":" & parsed.port
+
+  JwtVerifierUrls(
+    issuer: origin & normalizedOptions.issuerPath,
+    jwksUrl: origin & normalizedOptions.jwksPath,
+  )
+
+proc deriveJwtVerifierUrls*(baseUrl: string): JwtVerifierUrls =
+  ## Derives issuer and JWKS URLs from a provider base URL.
+  deriveJwtVerifierUrls(baseUrl, initJwtVerifierUrlOptions())
 
 proc issuer*(config: JwtVerifierConfig): lent string =
   config.issuer
