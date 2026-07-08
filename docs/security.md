@@ -14,6 +14,7 @@ Examples:
 
 - `examples/karax_browser_login` shows a same-origin Karax app using a signed browser session cookie.
 - `examples/oauth2_karax_login` shows Karax using OAuth2 authorization-code plus PKCE.
+- `examples/supabase_auth` shows API routes protected by Supabase Auth JWT access tokens.
 
 This guide explains how those pieces fit together and how to use them safely.
 
