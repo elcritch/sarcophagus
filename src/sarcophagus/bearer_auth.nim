@@ -1,6 +1,7 @@
-import std/macros
+import std/[json, macros]
 
 import mummy
+import mummy/routers
 import chroniclers
 
 import ./core/jwt_bearer_tokens
@@ -28,8 +29,10 @@ type
     proc(request: Request, claims: BearerTokenClaims) {.gcsafe.}
     ## Mummy handler shape for endpoints that need validated bearer-token claims.
 
-const routeRegistrationNames =
-  ["addRoute", "get", "head", "post", "put", "delete", "options", "patch"]
+const
+  routeRegistrationNames =
+    ["addRoute", "get", "head", "post", "put", "delete", "options", "patch"]
+  jwksContentType* = "application/jwk-set+json; charset=utf-8"
 
 proc bearerAuthFailurePayload(
     failure: TokenValidationFailure
@@ -50,6 +53,43 @@ proc defaultAuthErrorResponder*(
 ): BearerAuthApiError {.gcsafe.} =
   ## Builds the default JSON error response for bearer-token validation failures.
   bearerAuthErrorResponse(failure.statusCode, failure)
+
+proc jwksHandler*(
+    config: BearerTokenConfig,
+    cacheMaxAgeSeconds: Natural = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+): RequestHandler =
+  ## Builds a Mummy handler that serves this config's public JWKS document.
+  ##
+  ## The response is computed when the handler is created so unsupported or
+  ## missing public keys fail during route setup.
+  let body = $config.toJwks()
+  let cacheControl = "public, max-age=" & $cacheMaxAgeSeconds
+  return proc(request: Request) {.gcsafe.} =
+    if request.httpMethod != "GET" and request.httpMethod != "HEAD":
+      var headers: HttpHeaders
+      headers["Allow"] = "GET, HEAD"
+      request.respond(405, headers)
+      return
+
+    var headers: HttpHeaders
+    headers["Content-Type"] = jwksContentType
+    headers["Cache-Control"] = cacheControl
+    headers["Content-Length"] = $body.len
+    if request.httpMethod == "HEAD":
+      request.respond(200, headers)
+    else:
+      request.respond(200, headers, body)
+
+proc mountJwks*(
+    router: var Router,
+    config: BearerTokenConfig,
+    path = jwtVerifierDefaultJwksPath,
+    cacheMaxAgeSeconds: Natural = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+) =
+  ## Mounts `GET` and `HEAD` handlers for this config's public JWKS document.
+  let handler = jwksHandler(config, cacheMaxAgeSeconds)
+  router.get(path, handler)
+  router.head(path, handler)
 
 proc validateBearerRequest*(
     request: Request, config: BearerTokenConfig, requiredScopes: openArray[string] = []

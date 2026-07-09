@@ -12,6 +12,16 @@ type
     oauth2ClientAuthBasic
     oauth2ClientAuthRequestBody
 
+  PkceChallengeMethod* = enum
+    pkcePlain
+    pkceS256
+
+  PkceChallenge* = object
+    ## Client-side PKCE values for OAuth2 authorization-code flows.
+    codeVerifier*: string
+    codeChallenge*: string
+    codeChallengeMethod*: string
+
   OAuth2Client* = object
     clientId*: string
     clientSecret*: string
@@ -325,7 +335,7 @@ proc randomOAuth2AuthorizationCode*(): string =
   ## Returns a URL-safe high-entropy authorization code.
   randomUrlSafeSecret(32)
 
-proc isPkceValue(value: string): bool =
+func isPkceValue(value: string): bool =
   if value.len < 43 or value.len > 128:
     return false
   for ch in value:
@@ -336,9 +346,50 @@ proc isPkceValue(value: string): bool =
       return false
   true
 
+func pkceChallengeMethodName(challengeMethod: PkceChallengeMethod): string =
+  case challengeMethod
+  of pkcePlain: "plain"
+  of pkceS256: "S256"
+
 proc pkceS256Challenge*(codeVerifier: string): string =
   ## Computes the RFC 7636 S256 challenge for a code verifier.
   base64UrlEncodeBytes(sha256Bytes(codeVerifier))
+
+proc initPkceChallenge*(
+    codeVerifier: string, challengeMethod = pkceS256
+): PkceChallenge =
+  ## Builds PKCE authorization request values from a code verifier.
+  ##
+  ## The verifier must already satisfy RFC 7636 length and character rules.
+  if not isPkceValue(codeVerifier):
+    raise newException(
+      ValueError, "PKCE code_verifier must be 43 to 128 unreserved URI characters"
+    )
+
+  result.codeVerifier = codeVerifier
+  result.codeChallengeMethod = challengeMethod.pkceChallengeMethodName()
+  result.codeChallenge =
+    case challengeMethod
+    of pkcePlain:
+      codeVerifier
+    of pkceS256:
+      pkceS256Challenge(codeVerifier)
+
+proc randomPkceVerifier*(byteCount = 32): string =
+  ## Generates a high-entropy RFC 7636 `code_verifier`.
+  ##
+  ## The byte count controls entropy before base64url encoding. The default
+  ## yields a 43-character verifier, the RFC minimum length.
+  if byteCount < 32 or byteCount > 96:
+    raise newException(ValueError, "PKCE random byte count must be between 32 and 96")
+
+  result = randomUrlSafeSecret(byteCount)
+  if not isPkceValue(result):
+    raise newException(OSError, "failed to generate valid PKCE verifier")
+
+proc randomPkceChallenge*(challengeMethod = pkceS256, byteCount = 32): PkceChallenge =
+  ## Generates a random PKCE verifier and matching authorization challenge.
+  initPkceChallenge(randomPkceVerifier(byteCount), challengeMethod)
 
 proc validatePkceVerifier*(
     codeChallenge, codeChallengeMethod, codeVerifier: string

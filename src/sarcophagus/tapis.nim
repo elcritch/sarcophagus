@@ -15,6 +15,10 @@ from ./oauth2/hashed_clients import
 from ./oauth2/mummy_support import oauth2AuthorizeHandler, oauth2TokenHandler
 import ./tapis_utils
 import ./tapis_security
+from ./bearer_auth import jwksHandler
+from ./core/jwt_bearer_tokens import
+  BearerTokenConfig, jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+  jwtVerifierDefaultJwksPath
 
 export swagger, tapis_runtime, typed_api, tapis_security, tapis_utils
 
@@ -908,8 +912,14 @@ proc addRequestHandler*(
             middleware.after(context)
           except CatchableError as e:
             traceMiddlewareAfterHookRaised(
-              request, httpMethod, path, middleware.name, context.requestId,
-              context.traceparent, $e.name, e.msg,
+              request,
+              httpMethod,
+              path,
+              middleware.name,
+              context.requestId,
+              context.traceparent,
+              $e.name,
+              e.msg,
             )
       if previousContext.isSome():
         setCurrentRouteContext(previousContext.get())
@@ -955,6 +965,17 @@ proc registerOAuth2AuthorizationCode*(
   api.addRequestHandler(
     "POST", tokenPath, oauth2TokenHandler(config, consumeAuthorizationCode)
   )
+
+proc mountJwks*(
+    api: ApiRouter,
+    config: BearerTokenConfig,
+    path = jwtVerifierDefaultJwksPath,
+    cacheMaxAgeSeconds: Natural = jwtVerifierDefaultJwksCacheMaxAgeSeconds,
+) =
+  ## Mounts `GET` and `HEAD` handlers for this config's public JWKS document.
+  let handler = jwksHandler(config, cacheMaxAgeSeconds)
+  api.addRequestHandler("GET", path, handler)
+  api.addRequestHandler("HEAD", path, handler)
 
 proc respondApiError*(request: Request, e: ref Exception, config: ApiConfig) =
   ## Converts an exception to a negotiated TAPIS error response.

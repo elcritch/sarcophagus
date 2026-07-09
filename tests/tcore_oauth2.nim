@@ -229,6 +229,59 @@ suite "oauth2 client credentials":
     check scopeClaimsToScopes({"sync": "read", "user": "admin"}) ==
       @["sync:read", "user:admin"]
 
+suite "oauth2 pkce":
+  test "builds RFC 7636 S256 code challenges":
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+    check pkceS256Challenge(verifier) == challenge
+
+    let pkce = initPkceChallenge(verifier)
+    check pkce.codeVerifier == verifier
+    check pkce.codeChallenge == challenge
+    check pkce.codeChallengeMethod == "S256"
+    check validatePkceVerifier(
+      pkce.codeChallenge, pkce.codeChallengeMethod, pkce.codeVerifier
+    )
+
+  test "generates valid PKCE verifiers and challenges":
+    let pkce = randomPkceChallenge()
+    check pkce.codeVerifier.len == 43
+    check pkce.codeChallenge.len == 43
+    check pkce.codeChallengeMethod == "S256"
+    check validatePkceVerifier(
+      pkce.codeChallenge, pkce.codeChallengeMethod, pkce.codeVerifier
+    )
+
+    let larger = randomPkceChallenge(byteCount = 96)
+    check larger.codeVerifier.len == 128
+    check validatePkceVerifier(
+      larger.codeChallenge, larger.codeChallengeMethod, larger.codeVerifier
+    )
+
+    let plain = initPkceChallenge(pkce.codeVerifier, pkcePlain)
+    check plain.codeChallenge == pkce.codeVerifier
+    check plain.codeChallengeMethod == "plain"
+    check validatePkceVerifier(
+      plain.codeChallenge, plain.codeChallengeMethod, plain.codeVerifier
+    )
+
+  test "rejects invalid PKCE verifier inputs":
+    expect ValueError:
+      discard initPkceChallenge("short")
+
+    expect ValueError:
+      discard initPkceChallenge("x".repeat(129))
+
+    expect ValueError:
+      discard initPkceChallenge("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP@")
+
+    expect ValueError:
+      discard randomPkceVerifier(byteCount = 31)
+
+    expect ValueError:
+      discard randomPkceVerifier(byteCount = 97)
+
 suite "oauth2 authorization code":
   test "issues and exchanges authorization codes with pkce":
     let config = userLoginConfig()

@@ -1,6 +1,11 @@
 import
-  std/[base64, httpclient, json, locks, options, os, sets, strutils, tables, times, uri]
+  std/[
+    algorithm, base64, httpclient, json, locks, options, os, sets, strutils, tables,
+    times, uri,
+  ]
 
+import bearssl
+import bearssl_pkey_decoder
 import jwt
 import chroniclers
 
@@ -122,6 +127,11 @@ const
   neverFetchedJwksAt = int64.low
 
 proc parseTokenHeader(token: string, fallbackKid: string): TokenHeader {.gcsafe.}
+proc keyAlgorithm(
+  keys: Table[string, string],
+  keyAlgorithms: Table[string, BearerTokenAlgorithm],
+  kid: string,
+): Option[BearerTokenAlgorithm]
 
 proc nowUnix*(): int64 {.inline.} =
   getTime().toUnix()
@@ -824,6 +834,15 @@ proc base64UrlDecode(input: string): string =
     normalized.add('=')
   decode(normalized)
 
+proc bytesFromPointer(data: ptr byte, length: uint): string =
+  if data.isNil or length == 0:
+    return ""
+
+  let source = cast[ptr UncheckedArray[byte]](data)
+  result = newString(int(length))
+  for idx in 0 ..< int(length):
+    result[idx] = char(source[idx])
+
 proc derByte(value: int): string =
   result = newString(1)
   result[0] = char(value)
@@ -857,6 +876,115 @@ proc stripLeadingZeroBytes(bytes: string): string =
   while start < bytes.high and bytes[start] == char(0):
     inc start
   bytes[start .. ^1]
+
+proc publicKeyDerFromPem(publicKey: string): string =
+  var encoded = ""
+  var inPublicKey = false
+  var finished = false
+
+  for rawLine in publicKey.splitLines():
+    let line = rawLine.strip()
+    if line == "-----BEGIN PUBLIC KEY-----":
+      if inPublicKey:
+        raise newException(ValueError, "invalid public key PEM")
+      inPublicKey = true
+    elif line == "-----END PUBLIC KEY-----":
+      if not inPublicKey:
+        raise newException(ValueError, "invalid public key PEM")
+      finished = true
+      break
+    elif inPublicKey and line.len > 0:
+      encoded.add(line)
+
+  if encoded.len == 0 or not finished:
+    raise newException(ValueError, "public key PEM must contain a PUBLIC KEY block")
+
+  try:
+    decode(encoded)
+  except CatchableError as e:
+    raise newException(ValueError, "invalid public key PEM: " & e.msg)
+
+proc decodePublicKeyPem(publicKey: string, decoder: var PkeyDecoderContext) =
+  let der = publicKeyDerFromPem(publicKey)
+  pkeyDecoderInit(addr decoder)
+  if der.len > 0:
+    pkeyDecoderPush(addr decoder, unsafeAddr der[0], uint(der.len))
+  if pkeyDecoderLastError(addr decoder) != 0:
+    raise newException(ValueError, "invalid public key PEM")
+
+proc rsaPublicKeyJwk(
+    kid: string, publicKey: string, algorithm: BearerTokenAlgorithm
+): JsonNode =
+  var decoder: PkeyDecoderContext
+  decodePublicKeyPem(publicKey, decoder)
+  if pkeyDecoderKeyType(addr decoder) != KEYTYPE_RSA:
+    raise newException(ValueError, "public key PEM is not an RSA key")
+
+  let key = pkeyDecoderGetRsa(addr decoder)
+  if key.isNil:
+    raise newException(ValueError, "RSA public key is missing")
+  let modulus = stripLeadingZeroBytes(bytesFromPointer(key.n, key.nlen))
+  let exponent = stripLeadingZeroBytes(bytesFromPointer(key.e, key.elen))
+  if modulus.len == 0 or exponent.len == 0:
+    raise newException(ValueError, "RSA public key is missing modulus or exponent")
+
+  %*{
+    "kty": "RSA",
+    "kid": kid,
+    "alg": tokenAlgorithmName(algorithm),
+    "use": "sig",
+    "key_ops": ["verify"],
+    "n": base64UrlEncode(modulus),
+    "e": base64UrlEncode(exponent),
+  }
+
+proc ecPublicKeyPoint(key: ptr EcPublicKey): string =
+  if key.isNil:
+    raise newException(ValueError, "EC public key is missing")
+  if key.curve != EC_secp256r1:
+    raise newException(ValueError, "EC public key must use P-256")
+
+  result = bytesFromPointer(key.q, key.qlen)
+  if result.len == 65 and result[0] == char(0x04):
+    result = result[1 .. ^1]
+  if result.len != 64:
+    raise newException(ValueError, "P-256 public key point must be 64 bytes")
+
+proc ecPublicKeyJwk(
+    kid: string, publicKey: string, algorithm: BearerTokenAlgorithm
+): JsonNode =
+  var decoder: PkeyDecoderContext
+  decodePublicKeyPem(publicKey, decoder)
+  if pkeyDecoderKeyType(addr decoder) != KEYTYPE_EC:
+    raise newException(ValueError, "public key PEM is not an EC key")
+
+  let point = ecPublicKeyPoint(pkeyDecoderGetEc(addr decoder))
+  let x = point[0 ..< 32]
+  let y = point[32 ..< 64]
+
+  %*{
+    "kty": "EC",
+    "kid": kid,
+    "alg": tokenAlgorithmName(algorithm),
+    "crv": "P-256",
+    "use": "sig",
+    "key_ops": ["verify"],
+    "x": base64UrlEncode(x),
+    "y": base64UrlEncode(y),
+  }
+
+proc publicKeyJwk(kid, publicKey: string, algorithm: BearerTokenAlgorithm): JsonNode =
+  let effectiveKid = kid.strip()
+  if effectiveKid.len == 0:
+    raise newException(ValueError, "jwk kid must not be empty")
+
+  case algorithm
+  of bearerTokenRS256:
+    rsaPublicKeyJwk(effectiveKid, publicKey, algorithm)
+  of bearerTokenES256:
+    ecPublicKeyJwk(effectiveKid, publicKey, algorithm)
+  of bearerTokenHS256:
+    raise newException(ValueError, "HS256 signing keys cannot be published as JWKS")
 
 proc derInteger(rawBytes: string): string =
   var bytes = stripLeadingZeroBytes(rawBytes)
@@ -1002,6 +1130,38 @@ proc parseJwksSigningKeys*(jwksJson: string): seq[SigningKey] =
         raise newException(ValueError, "duplicate jwk key id: " & kid)
       seen.incl(kid)
       result.add(key.get())
+
+proc toJwk*(key: SigningKey): JsonNode =
+  ## Converts a supported asymmetric public signing key to a JWK.
+  publicKeyJwk(key.kid, key.keyMaterial(), key.algorithm)
+
+proc toJwks*(keys: openArray[SigningKey]): JsonNode =
+  ## Builds a JWKS document from supported asymmetric signing keys.
+  result = %*{"keys": []}
+  for key in keys:
+    if key.algorithm != bearerTokenHS256:
+      result["keys"].add(key.toJwk())
+
+  if result["keys"].len == 0:
+    raise newException(ValueError, "JWKS requires at least one asymmetric public key")
+
+proc toJwks*(config: BearerTokenConfig): JsonNode =
+  ## Builds a JWKS document from a bearer-token signing config.
+  ##
+  ## HS256 shared secrets are never included because they are not public keys.
+  result = %*{"keys": []}
+  var kids: seq[string]
+  for kid in config.keys.keys:
+    kids.add(kid)
+  kids.sort()
+
+  for kid in kids:
+    let algorithm = keyAlgorithm(config.keys, config.keyAlgorithms, kid)
+    if algorithm.isSome() and algorithm.get() != bearerTokenHS256:
+      result["keys"].add(publicKeyJwk(kid, config.keys[kid], algorithm.get()))
+
+  if result["keys"].len == 0:
+    raise newException(ValueError, "JWKS requires at least one asymmetric public key")
 
 proc verifierKeysFromJwks(jwksJson: string): VerifierKeySet =
   result.keys = initTable[string, string]()
