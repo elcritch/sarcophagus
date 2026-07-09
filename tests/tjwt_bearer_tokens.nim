@@ -200,6 +200,12 @@ proc jwksDocument(keys: openArray[JsonNode]): string =
     jwks["keys"].add(key)
   $jwks
 
+proc jwkByKid(jwks: JsonNode, kid: string): JsonNode =
+  for key in jwks["keys"]:
+    if key["kid"].getStr() == kid:
+      return key
+  raise newException(ValueError, "missing jwk kid: " & kid)
+
 proc tempKeyPath(name: string): string =
   getTempDir() / ("sarcophagus-jwt-" & $getCurrentProcessId() & "-" & name)
 
@@ -246,6 +252,28 @@ suite "bearer token core":
     check validation.claims.expiresAt == 1_700_000_600
     check validation.claims.scopes == @["sync:read", "sync:write"]
 
+  test "parsed signing key rings use explicit active kid":
+    let keys = parseSigningKeys("old:secret-a,new:secret-b")
+    let config = initBearerTokenConfig(
+      issuer = "sam-sync-server",
+      audience = "sam-sync-api",
+      keys = keys,
+      activeKid = "new",
+    )
+    let token = mintBearerToken(
+      config,
+      initBearerTokenSpec(
+        subject = "client-1",
+        scopes = ["sync:read"],
+        ttlSeconds = 600,
+        issuedAt = 1_700_000_000,
+      ),
+    )
+    let header = parseJson(base64UrlDecodeTest(token.split('.')[0]))
+    check config.activeKid == "new"
+    check header["kid"].getStr() == "new"
+    check validateBearerToken(config, token, now = 1_700_000_010).ok
+
   test "mints and validates RS256 bearer tokens with private signing keys":
     let signingKey =
       initPrivateSigningKey("rsa-1", rsPrivateKey, rsPublicKey, bearerTokenRS256)
@@ -282,6 +310,71 @@ suite "bearer token core":
       validateBearerToken(verifier, token, ["sync:read"], now = 1_700_000_010)
     check verifierValidation.ok
     check verifierValidation.claims.subject == "client-1"
+
+  test "asymmetric key rotation keeps old verification keys until removed":
+    let oldKey =
+      initPrivateSigningKey("rsa-old", rsPrivateKey, rsPublicKey, bearerTokenRS256)
+    let newKey =
+      initPrivateSigningKey("ec-new", ec256PrivateKey, ec256PublicKey, bearerTokenES256)
+    let oldConfig = initBearerTokenConfig(
+      issuer = "sam-sync-server",
+      audience = "sam-sync-api",
+      keys = [oldKey, newKey],
+      activeKid = "rsa-old",
+    )
+    let oldToken = mintBearerToken(
+      oldConfig,
+      initBearerTokenSpec(
+        subject = "client-1",
+        scopes = ["sync:read"],
+        ttlSeconds = 600,
+        issuedAt = 1_700_000_000,
+      ),
+    )
+    let oldHeader = parseJson(base64UrlDecodeTest(oldToken.split('.')[0]))
+    check oldHeader["alg"].getStr() == "RS256"
+    check oldHeader["kid"].getStr() == "rsa-old"
+
+    let rotatedConfig = initBearerTokenConfig(
+      issuer = "sam-sync-server",
+      audience = "sam-sync-api",
+      keys = [oldKey, newKey],
+      activeKid = "ec-new",
+    )
+    let oldOverlap =
+      validateBearerToken(rotatedConfig, oldToken, ["sync:read"], now = 1_700_000_010)
+    check oldOverlap.ok
+    check oldOverlap.claims.keyId == "rsa-old"
+
+    let newToken = mintBearerToken(
+      rotatedConfig,
+      initBearerTokenSpec(
+        subject = "client-1",
+        scopes = ["sync:read"],
+        ttlSeconds = 600,
+        issuedAt = 1_700_000_010,
+      ),
+    )
+    let newHeader = parseJson(base64UrlDecodeTest(newToken.split('.')[0]))
+    check newHeader["alg"].getStr() == "ES256"
+    check newHeader["kid"].getStr() == "ec-new"
+    check validateBearerToken(
+      rotatedConfig, newToken, ["sync:read"], now = 1_700_000_020
+    ).ok
+
+    let retiredConfig = initBearerTokenConfig(
+      issuer = "sam-sync-server",
+      audience = "sam-sync-api",
+      keys = [newKey],
+      activeKid = "ec-new",
+    )
+    let retiredOldValidation =
+      validateBearerToken(retiredConfig, oldToken, ["sync:read"], now = 1_700_000_020)
+    check not retiredOldValidation.ok
+    check retiredOldValidation.failure.message == "Unknown token key id"
+    check validateBearerToken(
+      retiredConfig, newToken, ["sync:read"], now = 1_700_000_020
+    ).ok
 
   test "mints and validates ES256 bearer tokens with private signing keys":
     let signingKey =
@@ -637,6 +730,59 @@ suite "bearer token core":
     let ecValidation = validateBearerToken(verifier, ecToken, now = 1_700_000_010)
     check ecValidation.ok
     check ecValidation.claims.keyId == "ec-1"
+
+  test "toJwks publishes RSA and P-256 public verification keys":
+    let rsaKey =
+      initPrivateSigningKey("rsa-1", rsPrivateKey, rsPublicKey, bearerTokenRS256)
+    let ecKey =
+      initPrivateSigningKey("ec-1", ec256PrivateKey, ec256PublicKey, bearerTokenES256)
+    let config = initBearerTokenConfig(
+      issuer = "external-issuer", audience = "external-api", keys = [rsaKey, ecKey]
+    )
+
+    let jwks = config.toJwks()
+    check jwks["keys"].len == 2
+    check jwks.jwkByKid("rsa-1") == rsaJwk("rsa-1")
+    check jwks.jwkByKid("ec-1") == ec256Jwk("ec-1")
+    check "PRIVATE KEY" notin $jwks
+
+    let verifier = initJwtVerifierConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = parseJwksSigningKeys($jwks),
+    )
+    check validateBearerToken(
+      verifier, signedExternalToken("RS256", "rsa-1", rsPrivateKey), now = 1_700_000_010
+    ).ok
+    check validateBearerToken(
+      verifier,
+      signedExternalToken("ES256", "ec-1", ec256PrivateKey),
+      now = 1_700_000_010,
+    ).ok
+
+  test "toJwks never publishes symmetric signing keys":
+    expect ValueError:
+      discard toJwk(SigningKey(kid: "shared-1", secret: "secret"))
+
+    let symmetricConfig = initBearerTokenConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [SigningKey(kid: "shared-1", secret: "secret")],
+    )
+    expect ValueError:
+      discard symmetricConfig.toJwks()
+
+    let mixedConfig = initBearerTokenConfig(
+      issuer = "external-issuer",
+      audience = "external-api",
+      keys = [
+        SigningKey(kid: "shared-1", secret: "secret"),
+        initPublicSigningKey("rsa-1", rsPublicKey, bearerTokenRS256),
+      ],
+    )
+    let jwks = mixedConfig.toJwks()
+    check jwks["keys"].len == 1
+    check jwks.jwkByKid("rsa-1") == rsaJwk("rsa-1")
 
   test "jwks verifier loads caches expires and refreshes unknown kid":
     var fetchCount = 0

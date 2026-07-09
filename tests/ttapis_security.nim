@@ -384,6 +384,39 @@ suite "typed mummy tapis security":
     let operation = spec["paths"]["/external-items/{id}"]["get"]
     check operation["security"][0]["externalJwt"].len == 0
 
+  test "mounts jwks on typed api routers":
+    randomize()
+    let config = initBearerTokenConfig(
+      issuer = testJwtIssuer,
+      audience = testJwtAudience,
+      keys = parseJwksSigningKeys(testJwksDocument([testRsaJwk("rsa-1")])),
+    )
+    let api = initApiRouter("TAPIS JWKS Test API", "1.0.0")
+    api.mountJwks(config, cacheMaxAgeSeconds = 321)
+
+    let server = newServer(api.router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let response =
+      client.get("http://127.0.0.1:" & $portNumber & jwtVerifierDefaultJwksPath)
+    check response.code.int == 200
+    check response.headers["Cache-Control"] == "public, max-age=321"
+    check parseJson(response.body)["keys"][0] == testRsaJwk("rsa-1")
+
   test "registers oauth2 token endpoint on typed api routers":
     withTestServer do(baseUrl: string, readToken, writeToken: string):
       discard readToken

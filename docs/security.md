@@ -146,6 +146,18 @@ router.registerOAuth2(oauthConfig)
 router.get("/items", oauth2(listItems, oauthConfig, ["items:read"]))
 ```
 
+If your `BearerTokenConfig` uses `RS256` or `ES256`, publish its public
+verification keys for other services with JWKS:
+
+```nim
+api.mountJwks(tokenConfig)
+router.mountJwks(tokenConfig)
+```
+
+This serves `/.well-known/jwks.json` by default. `HS256` shared secrets are not
+published as JWKS; consumers need an asymmetric public key, or a server-only
+shared secret for local verification.
+
 Use narrow scopes, not one broad `"admin"` scope for everything.
 
 ## OAuth2 Client Credentials
@@ -222,6 +234,19 @@ let oauthConfig = initOAuth2Config(
 
 Use an empty secret for public clients. Require PKCE. Prefer
 `code_challenge_method=S256`.
+
+Build authorization request PKCE values with the helper API:
+
+```nim
+let pkce = randomPkceChallenge()
+
+# Send these with the `/oauth/authorize` request.
+let codeChallenge = pkce.codeChallenge
+let codeChallengeMethod = pkce.codeChallengeMethod
+
+# Keep this client-side and submit it to `/oauth/token` as `code_verifier`.
+let codeVerifier = pkce.codeVerifier
+```
 
 Authorization-code registration on TAPIS:
 

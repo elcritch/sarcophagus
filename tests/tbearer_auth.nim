@@ -217,6 +217,47 @@ suite "mummy bearer auth":
     check claimsBody["subject"].getStr() == "external-client"
     check claimsBody["scopes"][0].getStr() == "sync:read"
 
+  test "mountJwks serves public jwks document":
+    randomize()
+    let config = initBearerTokenConfig(
+      issuer = testJwtIssuer,
+      audience = testJwtAudience,
+      keys = parseJwksSigningKeys(testJwksDocument([testRsaJwk("rsa-1")])),
+    )
+
+    var router: Router
+    router.mountJwks(config, cacheMaxAgeSeconds = 123)
+
+    let server = newServer(router, workerThreads = 1)
+    let portNumber = 20000 + rand(20000)
+    let args =
+      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+
+    var serverThread: Thread[ServerThreadArgs]
+    createThread(serverThread, serveServer, args)
+    defer:
+      server.close()
+      joinThread(serverThread)
+
+    server.waitUntilReady()
+
+    var client = newHttpClient(timeout = 5_000)
+    defer:
+      client.close()
+
+    let url = "http://127.0.0.1:" & $portNumber & jwtVerifierDefaultJwksPath
+    let response = client.get(url)
+    check response.code.int == 200
+    check response.headers["Content-Type"] == jwksContentType
+    check response.headers["Cache-Control"] == "public, max-age=123"
+    check parseJson(response.body)["keys"][0] == testRsaJwk("rsa-1")
+
+    let headResponse = client.request(url, httpMethod = HttpHead)
+    check headResponse.code.int == 200
+    check headResponse.headers["Content-Type"] == jwksContentType
+    check headResponse.headers["Content-Length"] == $response.body.len
+    check headResponse.body.len == 0
+
   test "external jwt bearer auth uses jwks after cheap request rejection":
     randomize()
     var fetchCount = 0

@@ -442,6 +442,19 @@ let validation = validateOAuth2BearerToken(
 )
 ```
 
+PKCE helpers for authorization-code clients:
+
+```nim
+let pkce = randomPkceChallenge()
+
+# Send these with the `/oauth/authorize` request.
+let codeChallenge = pkce.codeChallenge
+let codeChallengeMethod = pkce.codeChallengeMethod
+
+# Keep this client-side and submit it to `/oauth/token` as `code_verifier`.
+let codeVerifier = pkce.codeVerifier
+```
+
 Typed TAPIS registration is the first-class OAuth2 setup:
 
 - `api.registerOAuth2(config)` mounts the token endpoint.
@@ -701,6 +714,29 @@ let config = initBearerTokenConfig(
 )
 ```
 
+Asymmetric signing configs can publish their public verifier keys as a JWKS
+document. The default serving path is `/.well-known/jwks.json`.
+
+```nim
+import sarcophagus/tapis
+
+api.mountJwks(config)
+```
+
+Raw Mummy routers can mount the same document:
+
+```nim
+import mummy/routers
+import sarcophagus/bearer_auth
+
+var router: Router
+router.mountJwks(config)
+```
+
+Use `config.toJwks()` when you need the JSON document directly. `HS256` shared
+secrets are never included in JWKS output; publish `RS256` or `ES256` public
+keys instead.
+
 For external tokens signed elsewhere, use a validation-only verifier config.
 Sarcophagus validates these tokens but does not mint them:
 
@@ -875,6 +911,7 @@ Important helpers:
   checks the private-key file policy, and verifies the key pair before use.
 - `initPrivateSigningKeyFilePolicy` customizes the file helper's symlink,
   owner-only permission, and max-size checks.
+- `toJwk` and `toJwks` publish configured RS256/ES256 public verifier keys.
 - `initJwtVerifierConfig` configures validation-only JWT verification.
 - `initPublicSigningKey` configures RS256 and ES256 public-key verification.
 - `initJwtScopeClaim` maps JWT claim values into `prefix:value` scopes.
@@ -887,6 +924,8 @@ Important helpers:
   configures validation for Supabase access tokens with audience
   `authenticated` by default.
 - `refreshJwks` refreshes a configured JWKS cache explicitly.
+- `mountJwks` in `sarcophagus/bearer_auth` and `sarcophagus/tapis` serves
+  `/.well-known/jwks.json` for a `BearerTokenConfig`.
 
 `JwtVerifierConfig` exposes read-only issuer, audience, length, and key-id
 membership accessors, plus JWKS URL, fetch timestamp, and cache-age accessors.
@@ -906,6 +945,15 @@ Use stable `kid` values and rotate verifier keys by adding new keys, then
 removing retired keys after issued tokens expire. For locally minted HS256,
 RS256, and ES256 tokens, rotate by adding new signing keys, changing
 `activeKid`, then removing retired keys after issued tokens expire.
+
+```nim
+let rotatingConfig = initBearerTokenConfig(
+  issuer = "example-server",
+  audience = "example-api",
+  keys = parseSigningKeys("old:old-secret,new:new-secret"),
+  activeKid = "new",
+)
+```
 
 JWKS loading supports `RS256` RSA keys and `ES256` P-256 keys. Symmetric JWKS
 entries are ignored because they cannot be verified with public-key material.
