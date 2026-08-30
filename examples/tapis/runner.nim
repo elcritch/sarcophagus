@@ -1,6 +1,6 @@
 import std/[httpclient, json, os, osproc, sequtils, strformat, strutils]
 
-when defined(feature.sarcophagus.cbor):
+when defined(features.sarcophagus.cbor):
   import cborious/cbor2json
 
 proc repoRoot(): string =
@@ -42,7 +42,7 @@ proc printResponse(label: string, response: Response) =
     echo "location: ", response.headers["Location"]
   echo "body: ", response.body
 
-when defined(feature.sarcophagus.cbor):
+when defined(features.sarcophagus.cbor):
   proc printCborResponse(label: string, response: Response) =
     echo ""
     echo "== ", label
@@ -126,7 +126,7 @@ proc main() =
   echo "title: ", spec["info"]["title"].getStr()
   echo "paths: ", spec["paths"].keys().toSeq().join(", ")
 
-  when defined(feature.sarcophagus.cbor):
+  when defined(features.sarcophagus.cbor):
     let cborPets = client.request(
       baseUrl & "/pets/1",
       httpMethod = HttpGet,

@@ -1,16 +1,16 @@
 import std/[json, options, strutils]
 
-when defined(feature.sarcophagus.jsony):
+when defined(features.sarcophagus.jsony):
   import jsony
   export jsony
 else:
   import std/jsonutils
 
-when defined(feature.sarcophagus.cbor):
+when defined(features.sarcophagus.cbor):
   import cborious
   export cborious
 
-when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+when defined(features.sarcophagus.msgpack) or defined(features.sarcophagus.msgpack4nim):
   import msgpack4nim
   import msgpack4nim/msgpack2json
   export msgpack4nim
@@ -66,7 +66,7 @@ const
   cborContentType* = "application/cbor"
   msgPackContentType* = "application/msgpack"
 
-when defined(feature.sarcophagus.cbor):
+when defined(features.sarcophagus.cbor):
   const apiCborEncodingMode = {CborObjToMap, CborEnumAsString, CborCheckHoleyEnums}
 
 proc defaultApiConfig*(): ApiConfig =
@@ -74,10 +74,12 @@ proc defaultApiConfig*(): ApiConfig =
   result.defaultResponseFormat = apiJson
   result.requestFormats = {apiJson}
   result.responseFormats = {apiJson}
-  when defined(feature.sarcophagus.cbor):
+  when defined(features.sarcophagus.cbor):
     result.requestFormats.incl apiCbor
     result.responseFormats.incl apiCbor
-  when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+  when defined(features.sarcophagus.msgpack) or defined(
+    features.sarcophagus.msgpack4nim
+  ):
     result.requestFormats.incl apiMsgPack
     result.responseFormats.incl apiMsgPack
 
@@ -145,15 +147,14 @@ proc requestFormat*(contentType: string, config: ApiConfig): ApiFormat =
     if apiJson in config.requestFormats:
       return apiJson
   elif mediaMatches(contentType, "application/cbor", "+cbor"):
-    when defined(feature.sarcophagus.cbor):
+    when defined(features.sarcophagus.cbor):
       if apiCbor in config.requestFormats:
         return apiCbor
     else:
       discard
   elif mediaMatchesMsgPack(contentType):
-    when defined(feature.sarcophagus.msgpack) or defined(
-      feature.sarcophagus.msgpack4nim
-    ):
+    when defined(features.sarcophagus.msgpack) or
+        defined(features.sarcophagus.msgpack4nim):
       if apiMsgPack in config.requestFormats:
         return apiMsgPack
     else:
@@ -171,15 +172,14 @@ proc acceptTokenFormat(token: string, config: ApiConfig): Option[ApiFormat] =
       apiJson in config.responseFormats:
     return some(apiJson)
   if mediaMatches(value, "application/cbor", "+cbor"):
-    when defined(feature.sarcophagus.cbor):
+    when defined(features.sarcophagus.cbor):
       if apiCbor in config.responseFormats:
         return some(apiCbor)
     else:
       discard
   if mediaMatchesMsgPack(value):
-    when defined(feature.sarcophagus.msgpack) or defined(
-      feature.sarcophagus.msgpack4nim
-    ):
+    when defined(features.sarcophagus.msgpack) or
+        defined(features.sarcophagus.msgpack4nim):
       if apiMsgPack in config.responseFormats:
         return some(apiMsgPack)
     else:
@@ -200,7 +200,7 @@ proc responseFormat*(accept: string, config: ApiConfig): ApiFormat =
 proc encodeJsonApi*[T](value: T): string =
   when T is JsonNode:
     $value
-  elif defined(feature.sarcophagus.jsony):
+  elif defined(features.sarcophagus.jsony):
     jsony.toJson(value)
   else:
     $jsonutils.toJson(value, ToJsonOptions(enumMode: joptEnumString))
@@ -208,12 +208,12 @@ proc encodeJsonApi*[T](value: T): string =
 proc decodeJsonApi*[T](body: string, target: typedesc[T]): T =
   when T is JsonNode:
     parseJson(body)
-  elif defined(feature.sarcophagus.jsony):
+  elif defined(features.sarcophagus.jsony):
     body.fromJson(T)
   else:
     parseJson(body).to(T)
 
-when defined(feature.sarcophagus.cbor):
+when defined(features.sarcophagus.cbor):
   proc encodeCborApi*[T](value: T): string =
     when T is JsonNode:
       {.cast(gcsafe).}:
@@ -232,7 +232,7 @@ when defined(feature.sarcophagus.cbor):
       {.cast(gcsafe).}:
         fromCbor(body, T, apiCborEncodingMode)
 
-when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+when defined(features.sarcophagus.msgpack) or defined(features.sarcophagus.msgpack4nim):
   proc encodeMsgPackApi*[T](value: T): string =
     when T is JsonNode:
       msgpack2json.fromJsonNode(value)
@@ -250,14 +250,13 @@ proc encodeApi*[T](value: T, format: ApiFormat): string =
   of apiJson:
     encodeJsonApi(value)
   of apiCbor:
-    when defined(feature.sarcophagus.cbor):
+    when defined(features.sarcophagus.cbor):
       encodeCborApi(value)
     else:
       raiseApiError(406, "CBOR responses are not enabled", "cbor_not_enabled")
   of apiMsgPack:
-    when defined(feature.sarcophagus.msgpack) or defined(
-      feature.sarcophagus.msgpack4nim
-    ):
+    when defined(features.sarcophagus.msgpack) or
+        defined(features.sarcophagus.msgpack4nim):
       encodeMsgPackApi(value)
     else:
       raiseApiError(406, "MessagePack responses are not enabled", "msgpack_not_enabled")
@@ -267,14 +266,13 @@ proc decodeApi*[T](body: string, format: ApiFormat, target: typedesc[T]): T =
   of apiJson:
     decodeJsonApi(body, T)
   of apiCbor:
-    when defined(feature.sarcophagus.cbor):
+    when defined(features.sarcophagus.cbor):
       decodeCborApi(body, T)
     else:
       raiseApiError(415, "CBOR requests are not enabled", "cbor_not_enabled")
   of apiMsgPack:
-    when defined(feature.sarcophagus.msgpack) or defined(
-      feature.sarcophagus.msgpack4nim
-    ):
+    when defined(features.sarcophagus.msgpack) or
+        defined(features.sarcophagus.msgpack4nim):
       decodeMsgPackApi(body, T)
     else:
       raiseApiError(415, "MessagePack requests are not enabled", "msgpack_not_enabled")

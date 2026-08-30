@@ -400,9 +400,11 @@ proc hasRequestBody*[Params, Body](
 proc contentSchema*(schema: JsonNode): JsonNode =
   result = newJObject()
   result["application/json"] = %*{"schema": schema}
-  when defined(feature.sarcophagus.cbor):
+  when defined(features.sarcophagus.cbor):
     result["application/cbor"] = %*{"schema": schema}
-  when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+  when defined(features.sarcophagus.msgpack) or defined(
+    features.sarcophagus.msgpack4nim
+  ):
     result["application/msgpack"] = %*{"schema": schema}
 
 proc responseContentSchema*[T](target: typedesc[T]): JsonNode =
