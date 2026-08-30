@@ -6,10 +6,10 @@ import zippy
 
 import sarcophagus/tapis
 
-when defined(feature.sarcophagus.cbor):
+when defined(features.sarcophagus.cbor):
   import cborious
 
-when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+when defined(features.sarcophagus.msgpack) or defined(features.sarcophagus.msgpack4nim):
   import msgpack4nim/msgpack2json
 
 type
@@ -761,7 +761,7 @@ suite "typed mummy tapis":
       check docsContent.hasKey("text/html")
       check not docsContent.hasKey("application/json")
 
-  when defined(feature.sarcophagus.cbor):
+  when defined(features.sarcophagus.cbor):
     test "negotiates cbor request and response bodies":
       withTestServer do(baseUrl: string):
         var client = newHttpClient(timeout = 5_000)
@@ -789,7 +789,9 @@ suite "typed mummy tapis":
         check body.name == "binary"
         check body.count == 8
 
-  when defined(feature.sarcophagus.msgpack) or defined(feature.sarcophagus.msgpack4nim):
+  when defined(features.sarcophagus.msgpack) or defined(
+    features.sarcophagus.msgpack4nim
+  ):
     test "negotiates msgpack request and response bodies":
       withTestServer do(baseUrl: string):
         var client = newHttpClient(timeout = 5_000)

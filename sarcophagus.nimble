@@ -1,4 +1,4 @@
-version       = "0.14.0"
+version       = "0.14.1"
 author        = "Jaremy Creechley"
 description   = "mummy higher level api wrapper"
 license       = "Apache-2.0"
@@ -24,4 +24,4 @@ feature "msgpack":
   requires "msgpack4nim"
 
 feature "chronicles":
-  requires "chroniclers[chronicles] >= 0.2.1"
+  requires "chroniclers >= 0.2.1 [chronicles]"
