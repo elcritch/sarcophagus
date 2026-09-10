@@ -1,6 +1,7 @@
-import std/[httpclient, json, net, options, random, strutils, unittest]
+import std/[httpclient, json, net, options, strutils, unittest]
 
 import mummy
+import http_test_server
 import mummy/routers
 import zippy
 
@@ -13,11 +14,6 @@ when defined(features.sarcophagus.msgpack) or defined(features.sarcophagus.msgpa
   import msgpack4nim/msgpack2json
 
 type
-  ServerThreadArgs = object
-    server: Server
-    port: Port
-    address: string
-
   ItemMode = enum
     modeFast
     modeSlow
@@ -43,18 +39,6 @@ type
 
   BigOut = object
     text*: string
-
-proc serveServer(args: ServerThreadArgs) {.thread.} =
-  args.server.serve(args.port, address = args.address)
-
-randomize()
-var nextTestPort = 20000 + rand(20000)
-
-proc allocateTestPort(): Port =
-  result = Port(nextTestPort)
-  inc nextTestPort
-  if nextTestPort > 60000:
-    nextTestPort = 20000
 
 proc getItem(params: Params[GetItemParams]): ItemOut {.gcsafe.} =
   let verbose =
@@ -319,8 +303,7 @@ proc portFromBaseUrl(baseUrl: string): Port =
 proc withTestServer(body: proc(baseUrl: string) {.gcsafe.}) =
   let api = buildApi(includeStackTraces = true)
   let server = newServer(api.router, workerThreads = 1)
-  let port = allocateTestPort()
-  let args = ServerThreadArgs(server: server, port: port, address: "127.0.0.1")
+  let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
   var serverThread: Thread[ServerThreadArgs]
   createThread(serverThread, serveServer, args)
@@ -328,7 +311,7 @@ proc withTestServer(body: proc(baseUrl: string) {.gcsafe.}) =
     server.close()
     joinThread(serverThread)
 
-  server.waitUntilReady()
+  let port = server.testPort()
   body("http://127.0.0.1:" & $port)
 
 suite "typed mummy tapis":
@@ -470,8 +453,7 @@ suite "typed mummy tapis":
     router.get("/converted/@id", toMummyHandler(getItem, adsParams))
 
     let server = newServer(router, workerThreads = 1)
-    let port = allocateTestPort()
-    let args = ServerThreadArgs(server: server, port: port, address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -479,7 +461,7 @@ suite "typed mummy tapis":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let port = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:

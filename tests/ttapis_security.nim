@@ -1,24 +1,16 @@
-import std/[httpclient, json, options, random, strutils, unittest]
+import std/[httpclient, json, net, options, strutils, unittest]
 
 import mummy
+import http_test_server
 
 import jwt_test_fixtures
 import sarcophagus/[core/jwt_bearer_tokens, oauth2/core, tapis]
 from sarcophagus/oauth2 import OAuth2User
 
-type
-  ServerThreadArgs = object
-    server: Server
-    port: Port
-    address: string
-
-  ItemOut = object
-    id*: int
-    name*: string
-    verbose*: bool
-
-proc serveServer(args: ServerThreadArgs) {.thread.} =
-  args.server.serve(args.port, address = args.address)
+type ItemOut = object
+  id*: int
+  name*: string
+  verbose*: bool
 
 proc testConfig(): OAuth2Config =
   let tokenConfig = initBearerTokenConfig(
@@ -161,13 +153,10 @@ proc buildExternalJwtApi(verifier: JwtVerifierConfig): ApiRouter =
 proc withTestServer(
     body: proc(baseUrl: string, readToken, writeToken: string) {.gcsafe.}
 ) =
-  randomize()
   let config = testConfig()
   let api = buildApi(config)
   let server = newServer(api.router, workerThreads = 1)
-  let portNumber = 20000 + rand(20000)
-  let args =
-    ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+  let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
   var serverThread: Thread[ServerThreadArgs]
   createThread(serverThread, serveServer, args)
@@ -175,7 +164,7 @@ proc withTestServer(
     server.close()
     joinThread(serverThread)
 
-  server.waitUntilReady()
+  let portNumber = server.testPort()
   body(
     "http://127.0.0.1:" & $portNumber,
     issueToken(config, "items:read"),
@@ -300,7 +289,6 @@ suite "typed mummy tapis security":
       check authenticated.code.int == 200
 
   test "protects typed routes with external jwt security":
-    randomize()
     var fetchCount = 0
     let fetcher: JwksFetcher = proc(url: string): string =
       check url == "https://issuer.example/.well-known/jwks.json"
@@ -323,9 +311,7 @@ suite "typed mummy tapis security":
       signedTestRs256Jwt("rsa-2", "writer-client", ["items:write"], issuedAt)
     let api = buildExternalJwtApi(verifier)
     let server = newServer(api.router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -333,7 +319,7 @@ suite "typed mummy tapis security":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -385,7 +371,6 @@ suite "typed mummy tapis security":
     check operation["security"][0]["externalJwt"].len == 0
 
   test "mounts jwks on typed api routers":
-    randomize()
     let config = initBearerTokenConfig(
       issuer = testJwtIssuer,
       audience = testJwtAudience,
@@ -395,9 +380,7 @@ suite "typed mummy tapis security":
     api.mountJwks(config, cacheMaxAgeSeconds = 321)
 
     let server = newServer(api.router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -405,7 +388,7 @@ suite "typed mummy tapis security":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -442,7 +425,6 @@ suite "typed mummy tapis security":
       check body["scope"].getStr() == "items:read"
 
   test "registers authorization-code endpoints on typed api routers":
-    randomize()
     let config = authorizationCodeConfig()
     let store = newInMemoryOAuth2AuthorizationCodeStore()
     let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
@@ -456,9 +438,7 @@ suite "typed mummy tapis security":
     )
 
     let server = newServer(api.router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -466,7 +446,7 @@ suite "typed mummy tapis security":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(maxRedirects = 0, timeout = 5_000)
     defer:

@@ -1,17 +1,10 @@
-import std/[httpclient, json, options, random, strutils, tables, unittest]
+import std/[httpclient, json, net, options, strutils, tables, unittest]
 
 import mummy
+import http_test_server
 import mummy/routers
 
 import sarcophagus/[core/jwt_bearer_tokens, oauth2/core, oauth2/hashed_clients, tapis]
-
-type ServerThreadArgs = object
-  server: Server
-  port: Port
-  address: string
-
-proc serveServer(args: ServerThreadArgs) {.thread.} =
-  args.server.serve(args.port, address = args.address)
 
 proc testConfig(): OAuth2Config =
   let tokenConfig = initBearerTokenConfig(
@@ -178,7 +171,6 @@ suite "hashed oauth2 clients":
     check store.auditEvents[^1].reason == "unknown_client"
 
   test "mummy token handler issues tokens from hashed client store":
-    randomize()
     let config = testConfig()
     let store = newInMemoryHashedOAuth2ClientStore()
     discard seedHashedOAuth2Client(
@@ -194,9 +186,7 @@ suite "hashed oauth2 clients":
     )
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -204,7 +194,7 @@ suite "hashed oauth2 clients":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -224,7 +214,6 @@ suite "hashed oauth2 clients":
     check store.auditEvents.len == 1
 
   test "typed api router token handler issues tokens from hashed client store":
-    randomize()
     let config = testConfig()
     let store = newInMemoryHashedOAuth2ClientStore()
     discard seedHashedOAuth2Client(
@@ -243,9 +232,7 @@ suite "hashed oauth2 clients":
     )
 
     let server = newServer(api.router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -253,7 +240,7 @@ suite "hashed oauth2 clients":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
