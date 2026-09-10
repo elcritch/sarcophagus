@@ -71,6 +71,7 @@ template tapi*(
   responses: untyped = [],
 ) {.pragma.}
   ## Pragma for annotating procs that can be registered with `api.add`.
+  ## Explicit method registration checks that the method and static path match.
   ##
   ## Example: `proc read(id: int): Item {.tapi(get, "/items/@id").} = ...`
 
@@ -1522,6 +1523,57 @@ proc buildRouteHandler(
 
       `addHandlerCall`
 
+proc callName(node: NimNode): string =
+  case node.kind
+  of nnkIdent, nnkSym:
+    $node
+  of nnkOpenSymChoice, nnkClosedSymChoice:
+    if node.len > 0:
+      callName(node[0])
+    else:
+      ""
+  else:
+    ""
+
+proc findTapiPragma(impl: NimNode): NimNode =
+  if impl.kind notin {nnkProcDef, nnkFuncDef, nnkIteratorDef}:
+    return nil
+
+  let pragmas = impl[4]
+  if pragmas.kind != nnkPragma:
+    return nil
+
+  for pragma in pragmas:
+    if pragma.kind in {nnkCall, nnkCommand} and pragma.len > 0:
+      if callName(pragma[0]) == "tapi":
+        return pragma
+
+template checkTapiRoute(httpMethod, path, declaredMethod, declaredPath: static string) =
+  when httpMethod != declaredMethod:
+    {.
+      error:
+        "TAPIS method mismatch: registered " & httpMethod & " but handler declares " &
+        declaredMethod
+    .}
+  when path != declaredPath:
+    {.
+      error:
+        "TAPIS path mismatch: registered " & path & " but handler declares " &
+        declaredPath
+    .}
+
+macro validateTapiRoute(httpMethod, path, handler: typed): untyped =
+  result = newStmtList()
+  if handler.kind != nnkSym:
+    return
+  let pragma = findTapiPragma(handler.getImpl())
+  if pragma.isNil:
+    return
+  let declaredMethod = newLit(callName(pragma[1]).normalize().toUpperAscii())
+  result.add newCall(
+    bindSym"checkTapiRoute", httpMethod, path, declaredMethod, pragma[2]
+  )
+
 macro routeHandler*(
     api: typed,
     httpMethod: typed,
@@ -1534,7 +1586,10 @@ macro routeHandler*(
   ## Registers a typed route by analyzing the handler signature at compile time.
   ##
   ## Most applications use `api.get`, `api.post`, or `api.add` instead.
-  buildRouteHandler(api, httpMethod, path, handler, source, middlewares, meta)
+  result = newStmtList(
+    newCall(bindSym"validateTapiRoute", httpMethod, path, handler),
+    buildRouteHandler(api, httpMethod, path, handler, source, middlewares, meta),
+  )
 
 template defineApiMethod(name, httpMethod, source: untyped) =
   template name*(
@@ -1571,31 +1626,6 @@ defineApiMethod(delete, "DELETE", adsParams)
 defineApiMethod(post, "POST", adsBody)
 defineApiMethod(put, "PUT", adsBody)
 defineApiMethod(patch, "PATCH", adsBody)
-
-proc callName(node: NimNode): string =
-  case node.kind
-  of nnkIdent, nnkSym:
-    $node
-  of nnkOpenSymChoice, nnkClosedSymChoice:
-    if node.len > 0:
-      callName(node[0])
-    else:
-      ""
-  else:
-    ""
-
-proc findTapiPragma(impl: NimNode): NimNode =
-  if impl.kind notin {nnkProcDef, nnkFuncDef, nnkIteratorDef}:
-    return nil
-
-  let pragmas = impl[4]
-  if pragmas.kind != nnkPragma:
-    return nil
-
-  for pragma in pragmas:
-    if pragma.kind in {nnkCall, nnkCommand} and pragma.len > 0:
-      if callName(pragma[0]) == "tapi":
-        return pragma
 
 proc tapiArg(pragma: NimNode, index: int, fallback: NimNode): NimNode =
   if pragma.len > index:
@@ -1774,7 +1804,16 @@ macro add*(
     responseStatus,
     newTree(nnkExprEqExpr, ident"request", requestArg),
     newTree(nnkExprEqExpr, ident"responses", responsesArg),
-    newTree(nnkExprEqExpr, ident"middlewares", middlewares.copyNimTree()),
+    newTree(
+      nnkExprEqExpr,
+      ident"middlewares",
+      # Rebuild empty typed arrays so the registration template can infer their
+      # element type (Nim 2.2.12 retains the macro default's unresolved type).
+      if middlewares.kind == nnkBracket and middlewares.len == 0:
+        newTree(nnkBracket)
+      else:
+        middlewares.copyNimTree(),
+    ),
     newTree(nnkExprEqExpr, ident"security", security),
   )
 
@@ -1793,13 +1832,14 @@ template options*(
     security: ApiSecurity = noSecurity(),
 ): untyped =
   ## Registers an `OPTIONS` TAPIS route.
+  validateTapiRoute("OPTIONS", path, handler)
   route(
     api,
     "OPTIONS",
     path,
     handler,
     adsNone,
-    middlewares,
+    @middlewares,
     endpointMeta(
       summary, description, operationId, tags, responseStatus, request, responses,
       security,
