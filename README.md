@@ -100,6 +100,25 @@ Core pieces:
 - `ApiResponse[T]` lets a handler set status codes and headers.
 - `raiseApiError(status, message, code, details)` produces structured error JSON.
 
+You can repeat a handler's route at the registration site. When a handler has a
+`tapi` pragma, explicit registration checks both the HTTP method and path at
+compile time:
+
+```nim
+proc foo(): string {.tapi(get, "/foo").} =
+  "hello"
+
+let api = initApiRouter()
+api.get("/foo", foo)       # Matches the declaration.
+# api.get("/bar", foo)     # Compile error: path mismatch.
+# api.post("/foo", foo)    # Compile error: method mismatch.
+```
+
+For annotated handlers, the registration path must be a compile-time constant
+and match exactly, including parameter names and trailing slashes. Unannotated
+handlers still accept runtime paths. Explicit registration uses the metadata
+arguments supplied there; use `api.add(foo)` to read metadata from the pragma.
+
 Flat handler style keeps simple APIs concise:
 
 ```nim

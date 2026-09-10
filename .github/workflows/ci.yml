@@ -9,11 +9,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        nim-version: ['2.2.10', '2.2.12']
     steps:
       - uses: actions/checkout@v4
       - uses: jiro4989/setup-nim-action@v2
         with:
-          nim-version: '2.2.10'
+          nim-version: ${{ matrix.nim-version }}
       - name: Cache atlas deps
         uses: actions/cache@v4
         with:
