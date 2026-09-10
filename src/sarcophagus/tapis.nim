@@ -1549,7 +1549,9 @@ proc findTapiPragma(impl: NimNode): NimNode =
         return pragma
 
 template checkTapiRoute(httpMethod, path, declaredMethod, declaredPath: static string) =
-  when httpMethod != declaredMethod:
+  # HEAD may reuse GET's representation handler; response writing omits the body.
+  when httpMethod != declaredMethod and
+      not (httpMethod == "HEAD" and declaredMethod == "GET"):
     {.
       error:
         "TAPIS method mismatch: registered " & httpMethod & " but handler declares " &

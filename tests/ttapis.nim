@@ -199,7 +199,9 @@ proc htmlDocs(): RawResponse["text/html"] {.gcsafe.} =
 proc largeJson(): BigOut {.gcsafe.} =
   BigOut(text: "sarcophagus gzip json ".repeat(80))
 
-proc largeText(): RawResponse["text/plain"] {.gcsafe.} =
+proc largeText(): RawResponse["text/plain"] {.
+    tapi(get, "/large-text", summary = "Large text"), gcsafe
+.} =
   textResponse("sarcophagus gzip payload ".repeat(80))
 
 proc rawMummyStatus(request: Request) {.gcsafe.} =
@@ -278,7 +280,7 @@ proc buildApi(includeStackTraces = false): ApiRouter =
   api.get("/api-error", apiErrorHandler)
   api.get("/docs", htmlDocs, summary = "HTML docs")
   api.get("/large-json", largeJson, summary = "Large JSON")
-  api.get("/large-text", largeText, summary = "Large text")
+  api.add(largeText)
   api.head("/large-text", largeText, summary = "Large text headers")
   api.mountOpenApi()
   api
