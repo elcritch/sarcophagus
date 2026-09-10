@@ -110,6 +110,7 @@ proc foo(): string {.tapi(get, "/foo").} =
 
 let api = initApiRouter()
 api.get("/foo", foo)       # Matches the declaration.
+api.head("/foo", foo, summary = "Foo headers") # GET handlers also support HEAD.
 # api.get("/bar", foo)     # Compile error: path mismatch.
 # api.post("/foo", foo)    # Compile error: method mismatch.
 ```
@@ -118,6 +119,12 @@ For annotated handlers, the registration path must be a compile-time constant
 and match exactly, including parameter names and trailing slashes. Unannotated
 handlers still accept runtime paths. Explicit registration uses the metadata
 arguments supplied there; use `api.add(foo)` to read metadata from the pragma.
+
+An explicit `api.head` registration may reuse a `tapi(get, ...)` handler at the
+same path. The handler runs normally, and TAPIS omits the response body for HEAD.
+You can pair `api.add(foo)` with `api.head("/foo", foo, ...)` and supply separate
+HEAD metadata. All other method mismatches remain compile-time errors, including
+registering a HEAD-declared handler as GET.
 
 Flat handler style keeps simple APIs concise:
 

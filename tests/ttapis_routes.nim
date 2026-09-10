@@ -28,6 +28,18 @@ template checkMethod(methodName: untyped) =
           let api = initApiRouter()
           api.methodName("/different", endpoint)
       )
+      when astToStr(methodName) != "get":
+        doAssert not compiles(
+          block:
+            let api = initApiRouter()
+            api.get("/endpoint", endpoint)
+        )
+      when astToStr(methodName) notin ["get", "head"]:
+        doAssert not compiles(
+          block:
+            let api = initApiRouter()
+            api.head("/endpoint", endpoint)
+        )
 
 checkMethod(get)
 checkMethod(head)
@@ -38,6 +50,17 @@ checkMethod(delete)
 checkMethod(options)
 
 static:
+  doAssert not compiles(
+    block:
+      let api = initApiRouter()
+      api.head("/different", readFoo)
+  )
+  doAssert not compiles(
+    block:
+      let api = initApiRouter()
+      var path = endpointPath
+      api.head(path, readFoo)
+  )
   doAssert compiles(
     block:
       let api = initApiRouter()
@@ -77,6 +100,17 @@ static:
   )
 
 suite "TAPIS route declarations":
+  test "HEAD reuses a GET declaration with explicit metadata":
+    let api = initApiRouter()
+    api.add(readFoo)
+    api.head(endpointPath, readFoo, summary = "Foo headers", tags = ["system"])
+    api.head("/foo/@" & "id", flatFoo)
+    let spec = api.openApiJson()
+    check spec["paths"][endpointPath].hasKey("get")
+    check spec["paths"][endpointPath]["head"]["summary"].getStr() == "Foo headers"
+    check spec["paths"][endpointPath]["head"]["tags"] == %*["system"]
+    check spec["paths"]["/foo/{id}"].hasKey("head")
+
   test "matching explicit routes populate OpenAPI":
     let api = initApiRouter()
     api.get(endpointPath, readFoo)
