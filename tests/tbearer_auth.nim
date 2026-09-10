@@ -1,18 +1,11 @@
-import std/[httpclient, json, random, unittest]
+import std/[httpclient, json, net, unittest]
 
 import mummy
+import http_test_server
 import mummy/routers
 
 import jwt_test_fixtures
 import sarcophagus/[bearer_auth, core/jwt_bearer_tokens]
-
-type ServerThreadArgs = object
-  server: Server
-  port: Port
-  address: string
-
-proc serveServer(args: ServerThreadArgs) {.thread.} =
-  args.server.serve(args.port, address = args.address)
 
 proc respondJson(request: Request, statusCode: int, body: JsonNode) =
   var headers: mummy.HttpHeaders
@@ -36,7 +29,6 @@ proc customAuthError(failure: TokenValidationFailure): BearerAuthApiError {.gcsa
 
 suite "mummy bearer auth":
   test "macro and proc forms both protect routes and pass claims through":
-    randomize()
     let config = initBearerTokenConfig(
       issuer = "sam-sync-server",
       audience = "sam-sync-api",
@@ -64,9 +56,7 @@ suite "mummy bearer auth":
     router.get("/proc/claims", bearerTokAuth(claimsHandler, config, ["sync:read"]))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -74,7 +64,7 @@ suite "mummy bearer auth":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -110,7 +100,6 @@ suite "mummy bearer auth":
       check claimsBody["scopes"][0].getStr() == "sync:read"
 
   test "protected routes accept typed error responders":
-    randomize()
     let config = initBearerTokenConfig(
       issuer = "sam-sync-server",
       audience = "sam-sync-api",
@@ -124,9 +113,7 @@ suite "mummy bearer auth":
     )
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -134,7 +121,7 @@ suite "mummy bearer auth":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -148,7 +135,6 @@ suite "mummy bearer auth":
     check body["error"]["code"].getStr() == "missing_token"
 
   test "external jwt verifier configs protect raw mummy routes":
-    randomize()
     let issuerConfig = initBearerTokenConfig(
       issuer = "external-issuer",
       audience = "external-api",
@@ -178,9 +164,7 @@ suite "mummy bearer auth":
     router.get("/proc/claims", bearerTokAuth(claimsHandler, verifier, ["sync:read"]))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -188,7 +172,7 @@ suite "mummy bearer auth":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -218,7 +202,6 @@ suite "mummy bearer auth":
     check claimsBody["scopes"][0].getStr() == "sync:read"
 
   test "mountJwks serves public jwks document":
-    randomize()
     let config = initBearerTokenConfig(
       issuer = testJwtIssuer,
       audience = testJwtAudience,
@@ -229,9 +212,7 @@ suite "mummy bearer auth":
     router.mountJwks(config, cacheMaxAgeSeconds = 123)
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -239,7 +220,7 @@ suite "mummy bearer auth":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -259,7 +240,6 @@ suite "mummy bearer auth":
     check headResponse.body.len == 0
 
   test "external jwt bearer auth uses jwks after cheap request rejection":
-    randomize()
     var fetchCount = 0
     let fetcher: JwksFetcher = proc(url: string): string =
       check url == "https://issuer.example/.well-known/jwks.json"
@@ -284,9 +264,7 @@ suite "mummy bearer auth":
     router.get("/claims", bearerTokAuth(claimsHandler, verifier, ["sync:read"]))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -294,7 +272,7 @@ suite "mummy bearer auth":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:

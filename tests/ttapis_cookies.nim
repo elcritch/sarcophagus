@@ -1,16 +1,12 @@
-import std/[httpclient, json, net, options, random, strutils, times, unittest]
+import std/[httpclient, json, net, options, strutils, times, unittest]
 
 import mummy
+import http_test_server
 
 import sarcophagus/tapis
 import sarcophagus/cookies
 
 type
-  ServerThreadArgs = object
-    server: Server
-    port: Port
-    address: string
-
   CookieEcho = object
     theme*: string
     count*: int
@@ -21,18 +17,6 @@ type
 
 proc testSessionConfig(): SessionCookieConfig =
   initSessionCookieConfig("sid", "session-secret", ttlSeconds = 600, secure = false)
-
-randomize()
-var nextTestPort = 22000 + rand(20000)
-
-proc allocateTestPort(): Port =
-  result = Port(nextTestPort)
-  inc nextTestPort
-  if nextTestPort > 60000:
-    nextTestPort = 22000
-
-proc serveServer(args: ServerThreadArgs) {.thread.} =
-  args.server.serve(args.port, address = args.address)
 
 proc cookieEcho(request: Request): CookieEcho {.gcsafe.} =
   let sessionConfig = testSessionConfig()
@@ -63,8 +47,7 @@ proc buildApi(): ApiRouter =
 proc withTestServer(body: proc(baseUrl: string) {.gcsafe.}) =
   let api = buildApi()
   let server = newServer(api.router, workerThreads = 1)
-  let port = allocateTestPort()
-  let args = ServerThreadArgs(server: server, port: port, address: "127.0.0.1")
+  let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
   var serverThread: Thread[ServerThreadArgs]
   createThread(serverThread, serveServer, args)
@@ -72,7 +55,7 @@ proc withTestServer(body: proc(baseUrl: string) {.gcsafe.}) =
     server.close()
     joinThread(serverThread)
 
-  server.waitUntilReady()
+  let port = server.testPort()
   body("http://127.0.0.1:" & $port)
 
 proc cookieFromSetCookie(setCookie: string): string =

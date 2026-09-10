@@ -1,17 +1,13 @@
-import std/[httpclient, json, net, options, random, strutils, unittest]
+import std/[httpclient, json, net, options, strutils, unittest]
 
 import mummy
+import http_test_server
 
 import sarcophagus/core/jwt_bearer_tokens
 import sarcophagus/tapis
 import sarcophagus/security/[browser_login, password_login]
 
 type
-  ServerThreadArgs = object
-    server: Server
-    port: Port
-    address: string
-
   LoginBody = object
     username*: string
     password*: string
@@ -24,18 +20,6 @@ type
     subject*: string
     displayName*: string
     scopeCount*: int
-
-proc serveServer(args: ServerThreadArgs) {.thread.} =
-  args.server.serve(args.port, address = args.address)
-
-randomize()
-var nextTestPort = 24000 + rand(20000)
-
-proc allocateTestPort(): Port =
-  result = Port(nextTestPort)
-  inc nextTestPort
-  if nextTestPort > 60000:
-    nextTestPort = 24000
 
 proc testTokenConfig(): BearerTokenConfig =
   initBearerTokenConfig(
@@ -156,8 +140,7 @@ proc buildBrowserLoginApi(): ApiRouter =
 
 proc withApiServer(api: ApiRouter, body: proc(baseUrl: string) {.gcsafe.}) =
   let server = newServer(api.router, workerThreads = 1)
-  let port = allocateTestPort()
-  let args = ServerThreadArgs(server: server, port: port, address: "127.0.0.1")
+  let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
   var serverThread: Thread[ServerThreadArgs]
   createThread(serverThread, serveServer, args)
@@ -165,7 +148,7 @@ proc withApiServer(api: ApiRouter, body: proc(baseUrl: string) {.gcsafe.}) =
     server.close()
     joinThread(serverThread)
 
-  server.waitUntilReady()
+  let port = server.testPort()
   body("http://127.0.0.1:" & $port)
 
 proc cookieFromSetCookie(setCookie: string): string =

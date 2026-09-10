@@ -1,18 +1,11 @@
-import std/[httpclient, json, options, random, strutils, unittest]
+import std/[httpclient, json, net, options, strutils, unittest]
 
 import mummy
+import http_test_server
 import mummy/routers
 
 import jwt_test_fixtures
 import sarcophagus/[core/jwt_bearer_tokens, core/typed_api, oauth2, oauth2/core]
-
-type ServerThreadArgs = object
-  server: Server
-  port: Port
-  address: string
-
-proc serveServer(args: ServerThreadArgs) {.thread.} =
-  args.server.serve(args.port, address = args.address)
 
 proc respondJson(request: Request, statusCode: int, body: JsonNode) =
   var headers: mummy.HttpHeaders
@@ -112,7 +105,6 @@ proc codeFromLocation(location: string): string =
 
 suite "mummy oauth2":
   test "protected api routes enforce bearer auth semantics":
-    randomize()
     let config = testConfig()
     let tokenResponse = issueClientCredentialsToken(
       config,
@@ -128,9 +120,7 @@ suite "mummy oauth2":
       router.get("/claims", claimsHandler)
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -138,7 +128,7 @@ suite "mummy oauth2":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -189,7 +179,6 @@ suite "mummy oauth2":
     check claimsBody["scopes"][0].getStr() == "sync:read"
 
   test "token endpoint and protected resource work together":
-    randomize()
     let config = testConfig()
 
     var router: Router
@@ -197,9 +186,7 @@ suite "mummy oauth2":
     router.get("/claims", oauth2(claimsHandler, config, ["sync:read"]))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -207,7 +194,7 @@ suite "mummy oauth2":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -248,15 +235,11 @@ suite "mummy oauth2":
     check unauthenticated.headers["WWW-Authenticate"] == """Bearer realm="sam-sync""""
 
   test "typed mummy handler shim calls request-aware typed handlers":
-    randomize()
-
     var router: Router
     router.get("/typed-status", typedMummyHandler(typedStatusHandler))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -264,7 +247,7 @@ suite "mummy oauth2":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -278,16 +261,13 @@ suite "mummy oauth2":
     check body["path"].getStr() == "/typed-status"
 
   test "token endpoint returns invalid_client failures":
-    randomize()
     let config = testConfig()
 
     var router: Router
     router.post("/oauth/token", oauth2TokenHandler(config))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -295,7 +275,7 @@ suite "mummy oauth2":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -321,16 +301,13 @@ suite "mummy oauth2":
     check body["error"]["error"].getStr() == "invalid_client"
 
   test "token endpoint accepts typed error responders":
-    randomize()
     let config = testConfig()
 
     var router: Router
     router.post("/oauth/token", oauth2TokenHandler(config, onError = customTokenError))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -338,7 +315,7 @@ suite "mummy oauth2":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -362,7 +339,6 @@ suite "mummy oauth2":
     check body["error"]["error"].getStr() == "invalid_client"
 
   test "token endpoint accepts json body without grant_type or scope":
-    randomize()
     let config = testConfig()
 
     var router: Router
@@ -370,9 +346,7 @@ suite "mummy oauth2":
     router.get("/claims", oauth2(claimsHandler, config, {"sync": "read"}))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -380,7 +354,7 @@ suite "mummy oauth2":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -410,7 +384,6 @@ suite "mummy oauth2":
     check claimsBody["subject"].getStr() == "reader-service"
 
   test "protected api routes return insufficient_scope for wrong scope":
-    randomize()
     let config = testConfig()
     let tokenResponse = issueClientCredentialsToken(
       config,
@@ -424,9 +397,7 @@ suite "mummy oauth2":
     router.get("/write-only", oauth2(okHandler, config, ["sync:write"]))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -434,7 +405,7 @@ suite "mummy oauth2":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -454,7 +425,6 @@ suite "mummy oauth2":
     check body["error"]["error"].getStr() == "insufficient_scope"
 
   test "authorization-code endpoints issue user tokens for api routes":
-    randomize()
     let config = userLoginConfig()
     let store = newInMemoryOAuth2AuthorizationCodeStore()
     let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
@@ -470,9 +440,7 @@ suite "mummy oauth2":
     router.get("/claims", oauth2(claimsHandler, config, ["sync:read"]))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -480,7 +448,7 @@ suite "mummy oauth2":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(maxRedirects = 0, timeout = 5_000)
     defer:
@@ -523,7 +491,6 @@ suite "mummy oauth2":
     check parseJson(claimsResponse.body)["subject"].getStr() == "user-123"
 
   test "external jwt verifier configs protect raw oauth2 mummy routes":
-    randomize()
     let issuerConfig = initBearerTokenConfig(
       issuer = "external-issuer",
       audience = "external-api",
@@ -555,9 +522,7 @@ suite "mummy oauth2":
     )
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -565,7 +530,7 @@ suite "mummy oauth2":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
@@ -596,7 +561,6 @@ suite "mummy oauth2":
     check claimsBody["scopes"][0].getStr() == "sync:read"
 
   test "external jwt oauth2 wrapper uses jwks after cheap request rejection":
-    randomize()
     var fetchCount = 0
     let fetcher: JwksFetcher = proc(url: string): string =
       check url == "https://issuer.example/.well-known/jwks.json"
@@ -621,9 +585,7 @@ suite "mummy oauth2":
     router.get("/claims", oauth2(claimsHandler, verifier, ["sync:read"]))
 
     let server = newServer(router, workerThreads = 1)
-    let portNumber = 20000 + rand(20000)
-    let args =
-      ServerThreadArgs(server: server, port: Port(portNumber), address: "127.0.0.1")
+    let args = ServerThreadArgs(server: server, address: "127.0.0.1")
 
     var serverThread: Thread[ServerThreadArgs]
     createThread(serverThread, serveServer, args)
@@ -631,7 +593,7 @@ suite "mummy oauth2":
       server.close()
       joinThread(serverThread)
 
-    server.waitUntilReady()
+    let portNumber = server.testPort()
 
     var client = newHttpClient(timeout = 5_000)
     defer:
